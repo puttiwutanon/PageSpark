@@ -4,7 +4,8 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
 import LoginScreen from '../screens/auth/loginScreen';
 import SignUpScreen from '../screens/auth/signupScreen';
-import Navbar from '../components/navbar'; // This is your main app navigator with tabs
+import Navbar from '../components/navbar'; 
+import CameraScreen from '../screens/main/cameraScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -24,6 +25,7 @@ const AppNavigator = () => {
         {/* Main Application Flow */}
         {/* Replacing HomeScreen with Navbar connects your home, video storage, and account tabs */}
         <Stack.Screen name="MainApp" component={Navbar} />
+        <Stack.Screen name="camera" component={CameraScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

@@ -26,7 +26,7 @@ const HomeScreen = () => {
         </View>
 
         <View style={homeScreenStyle.routeToFunctionContainer}>
-            <TouchableOpacity style={homeScreenStyle.routeToFunction} onPress={() => navigation.navigate('Login')}>
+            <TouchableOpacity style={homeScreenStyle.routeToFunction} onPress={() => navigation.navigate('camera')}>
                 <AppText style={{ fontSize: 16, color: 'white' }}>สรุปบทเรียน</AppText>
                 <FontAwesome5 name="chalkboard-teacher" size={24} color="white" />
             </TouchableOpacity>

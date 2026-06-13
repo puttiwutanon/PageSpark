@@ -5,7 +5,7 @@ const authStyle = StyleSheet.create({
         flex: 1,
         justifyContent: 'center',
         alignItems: 'center',
-        backgroundColor: '#0F172A', // Using your PageSpark dark theme background
+        backgroundColor: '#ffdce5', 
     },
     authform: {
         alignItems: 'center',
@@ -14,7 +14,7 @@ const authStyle = StyleSheet.create({
         borderWidth: 1,
         borderRadius: 16,
         padding: 32,
-        width: '85%', // Responsive width instead of fit-content
+        width: '85%', 
         backgroundColor: 'rgba(255, 255, 255, 0.95)',
         
         // Box Shadow for iOS
@@ -66,7 +66,7 @@ const authStyle = StyleSheet.create({
         width: 150,
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: '#7C3AED', // Changed to your PageSpark primary Violet
+        backgroundColor: '#92d0ff',
     },
     buttonText: {
         color: '#fff',
@@ -78,7 +78,7 @@ const authStyle = StyleSheet.create({
         textAlign: 'center',
     },
     link: {
-        color: '#7C3AED', // PageSpark primary Violet
+        color: '#92d0ff', 
         marginTop: 16,
     }
 });
