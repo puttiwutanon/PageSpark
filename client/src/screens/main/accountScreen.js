@@ -18,13 +18,14 @@ import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { PieChart } from "react-native-gifted-charts";
 import { signOut } from 'firebase/auth';
 import { auth } from '../../firebase/firebaseConfig';
+import { Alert } from 'react-native';
 
 const AccountScreen = () => {
 
     const navigation = useNavigation();
 
     const placeholderData = [
-        { value: 70, color: '#14B8A6', text: '70%' }, // Bright Teal for Correct answers
+        { value: 70, color: '#92d0ff', text: '70%' }, // Bright Teal for Correct answers
         { value: 30, color: '#334155' }              // Dark slate for remaining
     ];
 
@@ -74,7 +75,7 @@ const AccountScreen = () => {
 
         <View style={accountScreenStyle.accountInfoContainer}>
             <View style={accountScreenStyle.routeToFunction} >
-                <AppText style={{ fontSize: 16, color: '#ffff' }}>คลิปที่สร้างไปแล้ว</AppText>
+                <AppText style={{ fontSize: 16, color: '#ffff', textAlign: 'center' }}>คลิปที่สร้างไปแล้ว</AppText>
                 <AppText style={{ fontSize: 16, color: '#ffff' }}>n</AppText>
             </View>
 
