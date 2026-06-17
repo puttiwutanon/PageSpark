@@ -51,6 +51,7 @@ const CameraScreen = () => {
         if (!result.canceled) {
             console.log("Image selected from gallery!");
             // TODO: Send result.assets[0] to Backend
+            await uploadImageToBackend(result.assets[0].uri);
         }
     };
 
