@@ -17,3 +17,4 @@ QUIZ_GENERATION_PROMPT = """
 Based on the extracted textbook concepts, generate 3 active-recall multiple-choice questions.
 Ensure there is one clear correct answer and three plausible distractors per question.
 """
+

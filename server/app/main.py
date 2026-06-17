@@ -1,5 +1,6 @@
 import os
 import tempfile
+from urllib import response
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
@@ -10,7 +11,8 @@ from dotenv import load_dotenv
 from app.core.prompts import LESSON_SUMMARY_SYSTEM_INSTRUCTION
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(current_dir, ".env"))
+server_dir = os.path.dirname(current_dir) 
+load_dotenv(os.path.join(server_dir, ".env"))
 
 app = FastAPI(title="Summary Ingestion API")
 client = genai.Client()
@@ -31,13 +33,17 @@ async def ingest_and_summarize(file: UploadFile = File(...)):
 
         # Pass the system instruction via GenerateContentConfig
         response = client.models.generate_content(
-            model='gemini-3.5-flash',
+            model='gemini-2.5-flash',
             contents=gemini_file,
             config=types.GenerateContentConfig(
                 system_instruction=LESSON_SUMMARY_SYSTEM_INSTRUCTION,
                 temperature=0.3 # Lower temperature for more accurate, factual summaries
             )
         )
+
+        print("\n" + "="*20 + " GEMINI OUTPUT " + "="*20)
+        print(response.text)
+        print("="*55 + "\n")
 
         return {
             "status": "success",

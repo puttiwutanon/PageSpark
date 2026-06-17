@@ -7,6 +7,7 @@ import { useNavigation } from '@react-navigation/native';
 import FontAwesome5 from '@expo/vector-icons/FontAwesome5';
 import { cameraScreenStyle } from '../../styles/cameraScreenStyles';
 import AppText from '../../components/appText';        
+import axios from 'axios';
 import AppTextInput from '../../components/appTextInput';
 
 const CameraScreen = () => {
@@ -32,9 +33,9 @@ const CameraScreen = () => {
     // 2. Function: Take a Picture
     const takePicture = async () => {
         if (cameraRef.current) {
-            const photo = await cameraRef.current.takePictureAsync({ base64: true });
-            console.log("Photo taken!");
-            // TODO: Route to a Preview Screen or send to Backend
+            const photo = await cameraRef.current.takePictureAsync();
+            // Call your new function right here!
+            await uploadImageToBackend(photo.uri); 
         }
     };
 
@@ -63,6 +64,27 @@ const CameraScreen = () => {
         if (!result.canceled) {
             console.log("PDF selected!");
             // TODO: Send result.assets[0] to Backend
+        }
+    };
+
+    // 5. Function: Upload Image to Backend
+    const uploadImageToBackend = async (imageUri) => {
+        const formData = new FormData();
+        formData.append('file', {
+            uri: imageUri,
+            name: 'photo.jpg',
+            type: 'image/jpeg',
+        });
+
+        try {
+            const response = await axios.post('http://192.168.1.149:8000/api/ingest', formData, {
+                headers: {
+                    'Content-Type': 'multipart/form-data',
+                },
+            });
+            console.log("Success:", response.data);
+        } catch (error) {
+            console.error("Axios upload failed:", error.response?.data || error.message);
         }
     };
 
