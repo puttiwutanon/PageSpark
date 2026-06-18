@@ -13,8 +13,7 @@ import { authStyle } from '../../styles';
 import { auth } from '../../firebase/firebaseConfig';
 import AppText from '../../components/appText';        
 import AppTextInput from '../../components/appTextInput';
-
-// Ensure you have this function exported in your firebase.js
+import { getFirestore, doc, setDoc } from "firebase/firestore";
 import { doCreateUserWithEmailAndPassword } from '../../firebase/auth';
 import { onAuthStateChanged } from 'firebase/auth'; 
 
@@ -42,7 +41,19 @@ export default function SignUpScreen() {
         setLoading(true);
 
         try {
-            await doCreateUserWithEmailAndPassword(email, password);
+            // The `const userCredential =` part is the line that matters here --
+            // without it, `userCredential` below is undefined and throws.
+            const userCredential = await doCreateUserWithEmailAndPassword(email, password);
+            const uid = userCredential.user.uid;
+
+            // Use the uid as the document ID so users/{uid} is always the lookup path.
+            // No query needed later -- just doc(db, "users", auth.currentUser.uid).
+            await setDoc(doc(getFirestore(), "users", uid), {
+                uid: uid,
+                email: email,
+                createdAt: new Date(),
+            });
+
             console.log('Account created successfully');
             
             // Navigate to Home or Login after successful registration
