@@ -4,4 +4,9 @@ __pycache__/
 *.pyd
 .DS_Store
 .env
+<<<<<<< HEAD
 serviceAccountKey.json
+=======
+serviceAccountKey.json
+server/app/renders
+>>>>>>> 3d8074f7b22ab877d0a9e597bbae91f8e8df79f9

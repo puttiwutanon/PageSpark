@@ -78,7 +78,7 @@ const CameraScreen = () => {
         });
 
         try {
-            const response = await axios.post('http://192.168.1.149:8000/api/ingest', formData, {
+            const response = await axios.post(' https://pamphlet-manmade-abridge.ngrok-free.dev/api/ingest', formData, {
                 headers: {
                     'Content-Type': 'multipart/form-data',
                 },
