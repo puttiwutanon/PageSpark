@@ -1,3 +1,4 @@
 start server: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 start client: npx expo start
 start venv: .\.venv\Scripts\Activate.ps1
+python -m app.scripts.test_manim_render
