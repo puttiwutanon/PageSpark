@@ -42,8 +42,8 @@ const accountScreenStyle = StyleSheet.create({
     logoutContainer: {
         width: '100%',
         alignItems: 'center',
-        marginTop: '10%',
-        marginBottom: '10%',
+        marginTop: '5%',
+        marginBottom: '25%',
     },
     logoutButton: {
         backgroundColor: '#FF3B30',
