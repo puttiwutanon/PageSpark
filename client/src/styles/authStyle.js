@@ -57,7 +57,7 @@ const authStyle = StyleSheet.create({
         width: 180,
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: '#eed0fb',
+        backgroundColor: '#c6cdfc',
     },
     buttonText: {
         color: '#fff',

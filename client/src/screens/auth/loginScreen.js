@@ -39,7 +39,6 @@ export default function LoginScreen() {
             const userCredential = await doSignInWithEmailAndPassword(email, password);
             console.log('Logged in user:', userCredential.user);
             
-            navigation.replace('MainApp'); 
         } catch (err) {
             console.error(err);
             setError('อีเมลหรือรหัสผ่านไม่ถูกต้อง');
@@ -48,15 +47,6 @@ export default function LoginScreen() {
         }
     };
 
-    useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-        if (user) {
-        navigation.replace('MainApp'); 
-        }
-    });
-
-    return () => unsubscribe();
-    }, []);
 
     return (
         <KeyboardAvoidingView 

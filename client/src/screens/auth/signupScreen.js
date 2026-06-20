@@ -55,9 +55,6 @@ export default function SignUpScreen() {
             });
 
             console.log('Account created successfully');
-            
-            // Navigate to Home or Login after successful registration
-            navigation.replace('MainApp'); 
         } catch (err) {
             console.error(err);
             setError('ไม่สามารถสร้างบัญชีได้ โปรดลองใหม่อีกครั้ง');
@@ -65,18 +62,6 @@ export default function SignUpScreen() {
             setLoading(false);
         }
     };
-
-    useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-        if (user) {
-        // Use the exact name you gave the screen in your Navigator
-        // Example: If your <Stack.Screen name="Home" ... />
-        navigation.replace('MainApp'); 
-        }
-    });
-
-    return () => unsubscribe();
-    }, []);
 
     return (
         <KeyboardAvoidingView 
