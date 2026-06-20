@@ -16,12 +16,22 @@ const Navbar = () => {
       screenOptions={{
         tabBarStyle: {
           ...navbarStyle.navbar, // Fixed reference from missing 'styles' to imported 'navbarStyle'
-          borderTopWidth: 0, 
-          elevation: 0,      
-          shadowOpacity: 0,
-          backgroundColor: '#ffdce5', 
+        borderTopWidth: 0,
+        elevation: 0,
+        shadowOpacity: 0,
+        backgroundColor: 'rgba(128, 128, 128, 0.27)',
+        position: 'absolute',
+        marginHorizontal: 20,
+        borderRadius: 40,
+        marginBottom: 60,
+        paddingBottom: 30, 
         },
-        tabBarActiveTintColor: '#92d0ff',   
+        tabBarItemStyle: {
+            flex: 1,
+            justifyContent: 'center',
+            alignItems: 'center',
+        },
+        tabBarActiveTintColor: '#fff',   
         tabBarInactiveTintColor: '#64748B',
         tabBarShowLabel: false,
         headerShown: false,

@@ -5,6 +5,7 @@ const homeScreenStyle = StyleSheet.create({
         width: '100%',
         flex: 1,
         alignItems: 'center',
+        experimental_backgroundImage: 'linear-gradient(360deg, #c9befc, #c6cdfc, #e2ddfd, #ece8fd)'
     },
     routeToFunctionContainer: {
         width: '100%',
@@ -14,7 +15,7 @@ const homeScreenStyle = StyleSheet.create({
         marginTop: '5%',
     },
     routeToFunction: {
-        backgroundColor: '#92d0ff',
+        backgroundColor: 'rgba(128, 128, 128, 0.27)',
         padding: 10,
         margin: 10,
         borderRadius: 16,

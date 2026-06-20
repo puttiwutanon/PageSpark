@@ -5,6 +5,7 @@ const accountScreenStyle = StyleSheet.create({
         width: '100%',
         flex: 1,
         alignItems: 'center',
+        experimental_backgroundImage: 'linear-gradient(360deg, #c9befc, #c6cdfc, #e2ddfd, #ece8fd)'
     },
     profileHeader: {
         width: '100%',
@@ -24,14 +25,14 @@ const accountScreenStyle = StyleSheet.create({
         marginTop: '10%',
         display: 'flex',
         flexDirection: 'row',
-        justifyContent: 'space-around',
+        justifyContent: 'center',
     },
     routeToFunction: {
-        backgroundColor: '#92d0ff',
+        backgroundColor: 'rgba(128, 128, 128, 0.27)',
         padding: 10,
         margin: 10,
         borderRadius: 16,
-        width: '45%',
+        width: '50%',
         height: 100,
         display: 'flex',
         justifyContent: 'center',
@@ -41,7 +42,7 @@ const accountScreenStyle = StyleSheet.create({
     logoutContainer: {
         width: '100%',
         alignItems: 'center',
-        marginTop: '20%',
+        marginTop: '10%',
         marginBottom: '10%',
     },
     logoutButton: {

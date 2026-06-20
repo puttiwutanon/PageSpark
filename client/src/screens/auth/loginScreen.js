@@ -73,8 +73,6 @@ export default function LoginScreen() {
                         <AppText style={authStyle.label}>อีเมล</AppText>
                         <AppTextInput
                             style={authStyle.input}
-                            placeholder="กรุณาใส่อีเมล"
-                            placeholderTextColor="#A0A0A0"
                             value={email}
                             onChangeText={setEmail} // onChange -> onChangeText
                             keyboardType="email-address"
@@ -88,8 +86,6 @@ export default function LoginScreen() {
                         <AppText style={authStyle.label}>รหัสผ่าน</AppText>
                         <AppTextInput
                             style={authStyle.input}
-                            placeholder="กรุณาใส่รหัสผ่าน"
-                            placeholderTextColor="#A0A0A0"
                             value={password}
                             onChangeText={setPassword}
                             secureTextEntry={true} // Replaces type="password"

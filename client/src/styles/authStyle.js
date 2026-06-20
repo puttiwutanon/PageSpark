@@ -5,37 +5,28 @@ const authStyle = StyleSheet.create({
         flex: 1,
         justifyContent: 'center',
         alignItems: 'center',
-        backgroundColor: '#ffdce5', 
+        experimental_backgroundImage: 'linear-gradient(360deg, #c9befc, #c6cdfc, #e2ddfd, #ece8fd)' 
     },
     authform: {
         alignItems: 'center',
         justifyContent: 'center',
-        borderColor: '#808080',
-        borderWidth: 1,
-        borderRadius: 16,
+        borderRadius: 20,
         padding: 32,
         width: '85%', 
-        backgroundColor: 'rgba(255, 255, 255, 0.95)',
+        experimental_backgroundImage: 'linear-gradient(180deg, #6d748673, #0a0d1326,  #0a0d1326, #6d748673)' 
         
-        // Box Shadow for iOS
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 10 },
-        shadowOpacity: 0.16,
-        shadowRadius: 36,
-        // Box Shadow for Android
-        elevation: 5,
     },
     title: {
         fontSize: 24,
         marginBottom: 20,
-        color: '#0F172A',
+        color: '#fff',
     },
     authformEmail: {
         width: '100%',
         alignItems: 'center',
         justifyContent: 'center',
         borderBottomWidth: 1,
-        borderBottomColor: '#808080',
+        borderBottomColor: '#fff',
         paddingBottom: 20,
     },
     textInputContainer: {
@@ -46,31 +37,32 @@ const authStyle = StyleSheet.create({
     label: {
         fontSize: 14,
         marginBottom: 8,
-        color: '#333',
+        color: '#fff',
         fontWeight: '600',
     },
     input: {
         width: '100%',
-        padding: 12,
-        borderWidth: 1,
-        borderColor: '#ccc',
-        borderRadius: 8,
-        backgroundColor: '#fff',
+        paddingVertical: 8,
+        borderBottomWidth: 1,
+        borderBottomColor: '#fff', // White underline
+        color: '#fff',
         fontSize: 16,
+        // Removed border, backgroundColor, and borderRadius to match the design
     },
     button: {
         paddingVertical: 12,
         paddingHorizontal: 24,
         marginTop: 16,
         borderRadius: 12,
-        width: 150,
+        width: 180,
         alignItems: 'center',
         justifyContent: 'center',
-        backgroundColor: '#92d0ff',
+        backgroundColor: '#eed0fb',
     },
     buttonText: {
         color: '#fff',
         fontSize: 16,
+        alignSelf: 'center',
     },
     errorText: {
         color: '#F43F5E', // PageSpark error color
@@ -78,7 +70,7 @@ const authStyle = StyleSheet.create({
         textAlign: 'center',
     },
     link: {
-        color: '#92d0ff', 
+        color: '#fff', 
         marginTop: 16,
     }
 });

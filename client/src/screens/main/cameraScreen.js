@@ -109,7 +109,7 @@ const CameraScreen = () => {
             <View style={cameraScreenStyle.controlsContainer}>
                 {/* Pick Image Button */}
                 <TouchableOpacity style={cameraScreenStyle.iconButton} onPress={pickImage}>
-                    <FontAwesome5 name="image" size={28} color="#92d0ff" />
+                    <FontAwesome5 name="image" size={28} color="#fff" />
                     <AppText style={cameraScreenStyle.iconText}>เลือกรูป</AppText>
                 </TouchableOpacity>
 
@@ -120,7 +120,7 @@ const CameraScreen = () => {
 
                 {/* Pick PDF Button */}
                 <TouchableOpacity style={cameraScreenStyle.iconButton} onPress={pickPdf}>
-                    <FontAwesome5 name="file-pdf" size={28} color="#92d0ff" />
+                    <FontAwesome5 name="file-pdf" size={28} color="#fff" />
                     <AppText style={cameraScreenStyle.iconText}>เลือก PDF</AppText>
                 </TouchableOpacity>
             </View>

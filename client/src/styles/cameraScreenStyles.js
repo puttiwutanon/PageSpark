@@ -3,7 +3,7 @@ import { StyleSheet } from 'react-native';
 const cameraScreenStyle = StyleSheet.create({
     container: {
         flex: 1,
-        backgroundColor: '#ffdce5', // PageSpark Deep Navy
+        experimental_backgroundImage: 'linear-gradient(360deg, #c9befc, #c6cdfc, #e2ddfd, #ece8fd)', // PageSpark Deep Navy
     },
     header: {
         flexDirection: 'row',

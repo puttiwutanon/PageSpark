@@ -92,8 +92,6 @@ export default function SignUpScreen() {
                         <AppText style={authStyle.label}>อีเมล</AppText>
                         <AppTextInput 
                             style={authStyle.input}
-                            placeholder="กรุณาใส่อีเมล"
-                            placeholderTextColor="#A0A0A0"
                             value={email}
                             onChangeText={setEmail}
                             keyboardType="email-address"
@@ -106,8 +104,6 @@ export default function SignUpScreen() {
                         <AppText style={authStyle.label}>รหัสผ่าน</AppText>
                         <AppTextInput 
                             style={authStyle.input}
-                            placeholder="กรุณาใส่รหัสผ่าน"
-                            placeholderTextColor="#A0A0A0"
                             value={password}
                             onChangeText={setPassword}
                             secureTextEntry={true}
@@ -119,8 +115,6 @@ export default function SignUpScreen() {
                         <AppText style={authStyle.label}>ยืนยันรหัสผ่าน</AppText>
                         <AppTextInput 
                             style={authStyle.input}
-                            placeholder="กรุณายืนยันรหัสผ่าน"
-                            placeholderTextColor="#A0A0A0"
                             value={confirmPassword}
                             onChangeText={setConfirmPassword}
                             secureTextEntry={true}

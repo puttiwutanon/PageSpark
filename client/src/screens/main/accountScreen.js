@@ -25,8 +25,8 @@ const AccountScreen = () => {
     const navigation = useNavigation();
 
     const placeholderData = [
-        { value: 70, color: '#92d0ff', text: '70%' }, // Bright Teal for Correct answers
-        { value: 30, color: '#334155' }              // Dark slate for remaining
+        { value: 70, color: '#eed0fb', text: '70%' }, // Bright Teal for Correct answers
+        { value: 30, color: '#fff' }              // Dark slate for remaining
     ];
 
     const handleLogout = async () => {
@@ -51,8 +51,9 @@ const AccountScreen = () => {
             <AppText style={accountScreenStyle.welcomeText}>USER PROFILE</AppText>
         </View>
 
+        <View style={{ width: '90%', alignItems: 'center', marginTop: '5%', backgroundColor: 'rgba(128, 128, 128, 0.27)', padding: 20, borderRadius: 16 }}>
             <View style={{ alignItems: 'center', marginVertical: 2 }}>
-                <AppText style={{ fontSize: 18, marginBottom: 15, fontWeight: 'bold', color: '#FFF' }}>
+                <AppText style={{ fontSize: 18, marginBottom: 15, color: '#FFF' }}>
                     สถิติการทำแบบทดสอบหลังเรียน
                 </AppText>
                 
@@ -73,17 +74,18 @@ const AccountScreen = () => {
                 />
             </View>
 
-        <View style={accountScreenStyle.accountInfoContainer}>
-            <View style={accountScreenStyle.routeToFunction} >
-                <AppText style={{ fontSize: 16, color: '#ffff', textAlign: 'center' }}>คลิปที่สร้างไปแล้ว</AppText>
-                <AppText style={{ fontSize: 16, color: '#ffff' }}>n</AppText>
-            </View>
+            <View style={accountScreenStyle.accountInfoContainer}>
+                <View style={accountScreenStyle.routeToFunction} >
+                    <AppText style={{ fontSize: 12, color: '#ffff', textAlign: 'center' }}>คลิปที่สร้างไปแล้ว</AppText>
+                    <AppText style={{ fontSize: 14, color: '#ffff' }}>n</AppText>
+                </View>
 
-            <View style={accountScreenStyle.routeToFunction}>
-                <AppText style={{ fontSize: 16, color: '#FFFFFF', textAlign: 'center' }}>ทำแบบทดสอบไปแล้ว</AppText>
-                <AppText style={{ fontSize: 16, color: '#ffff' }}>n</AppText>
-            </View>
+                <View style={accountScreenStyle.routeToFunction}>
+                    <AppText style={{ fontSize: 12, color: '#FFFFFF', textAlign: 'center' }}>ทำแบบทดสอบไปแล้ว</AppText>
+                    <AppText style={{ fontSize: 14, color: '#ffff' }}>n</AppText>
+                </View>
 
+            </View>
         </View>
 
         <View style={accountScreenStyle.logoutContainer}>

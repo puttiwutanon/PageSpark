@@ -2,18 +2,16 @@ import { StyleSheet } from 'react-native';
 
 const navbarStyle = StyleSheet.create({
   navbar:{
-    height: 95,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
+    paddingHorizontal: 20,
+    height: 60,
     fontFamily: 'Kanit',
-    paddingTop: 15,
     fontSize: 20,
+    display: 'flex',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 30,
   },
-   tabBarItemStyle: {
-     borderRadius: 40,
-     overflow: 'hidden',
-   },
 });
 
 export { navbarStyle };
