@@ -11,8 +11,7 @@ from dotenv import load_dotenv
 from app.core.prompts import LESSON_SUMMARY_SYSTEM_INSTRUCTION
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
-server_dir = os.path.dirname(current_dir) 
-load_dotenv(os.path.join(server_dir, ".env"))
+load_dotenv(os.path.join(current_dir, ".env"))
 
 app = FastAPI(title="Summary Ingestion API")
 client = genai.Client()

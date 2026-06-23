@@ -28,164 +28,116 @@ class PhysicsScene(Scene):
         middle_center = np.array([0, middle_zone_center_y, 0])
         bottom_center = np.array([0, bottom_zone_center_y, 0])
 
-        # --- Problem Variables ---
-        h0 = 50.0
-        v0 = 25.0
-        angle_deg = -37.0 # Downward angle
-        g = 10.0
-        theta = np.radians(angle_deg)
+        # --- Problem Constants ---
+        L1 = 0.4 # meters (40 cm)
+        f1 = 20 # Hz
+        lambda1 = 2 * L1 # 0.8 meters
+        v1 = f1 * lambda1 # 16 m/s
 
-        vx = v0 * np.cos(theta)
-        vy0 = v0 * np.sin(theta)
+        # --- Mobjects for Hook ---
+        problem_text = VGroup(
+            Text('ลวดเส้นหนึ่งยาว 40 เซนติเมตร ปลายทั้งสองถูกขึงตึง', font='TH Sarabun New', font_size=28, color=WHITE),
+            Text('เมื่อดีดลวดตรงกลางทำให้เส้นลวดสั่นขึ้นลงด้วยความถี่ 20 เฮิรตซ์', font='TH Sarabun New', font_size=28, color=WHITE),
+            Text('จงหาอัตราเร็วของคลื่นในลวดเส้นนี้', font='TH Sarabun New', font_size=28, color=WHITE)
+        ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
+        if problem_text.width > frame_width * 0.88:
+            problem_text.scale_to_fit_width(frame_width * 0.88)
+        if problem_text.height > top_zone_height * 0.88:
+            problem_text.scale_to_fit_height(top_zone_height * 0.88)
+        problem_text.move_to(top_center)
 
-        # Calculate t_flight using quadratic formula for 0 = h0 + vy0*t - 0.5*g*t^2
-        # 0.5*g*t^2 - vy0*t - h0 = 0
-        # t = (vy0 + sqrt(vy0^2 + 2*g*h0)) / g (using positive root for time)
-        # The formula t = (vy0 + np.sqrt(vy0**2 + 2*g*h0)) / g is also correct for signed vy0
-        # Let's use the one derived from the quadratic formula directly for clarity.
-        # t = (-b +/- sqrt(b^2 - 4ac)) / 2a where a=0.5g, b=-vy0, c=-h0
-        # t = (vy0 +/- sqrt((-vy0)^2 - 4(0.5g)(-h0))) / (2*0.5g)
-        # t = (vy0 +/- sqrt(vy0^2 + 2gh0)) / g
-        # Since vy0 is negative, we need the positive root for time.
-        t_flight = (vy0 + np.sqrt(vy0**2 + 2*g*h0)) / g
+        # --- Mobjects for Diagram Explain ---
+        # Horizontal line for the string
+        string_line = Line(start=[-L1/2, 0, 0], end=[L1/2, 0, 0], color=GRAY_C, stroke_width=2)
+        # Standing wave (one loop) - using a sine function for visualization
+        def wave_func(x):
+            return 0.15 * np.sin(np.pi * (x + L1/2) / L1)
+        wave_path = ParametricFunction(lambda t: [t, wave_func(t), 0], t_range=[-L1/2, L1/2], color=TEAL_C, stroke_width=4)
+        # Fixed ends (Nodes)
+        fixed_end_left = Dot(point=[-L1/2, 0, 0], color=ORANGE, radius=0.08)
+        fixed_end_right = Dot(point=[L1/2, 0, 0], color=ORANGE, radius=0.08)
+        # Labels for L and lambda/2
+        length_brace = Brace(string_line, direction=DOWN, buff=0.1)
+        length_label = VGroup(
+            MathTex('L = 40\,\mathrm{cm}', font_size=18, color=GRAY_A),
+            MathTex('= 0.4\,\mathrm{m}', font_size=18, color=GRAY_A)
+        ).arrange(DOWN, aligned_edge=LEFT, buff=0.05).next_to(length_brace, DOWN, buff=0.1)
 
-        x_range_total = vx * t_flight
+        lambda_brace = Brace(wave_path, direction=UP, buff=0.1)
+        lambda_label = MathTex('\\frac{\lambda}{2}', font_size=18, color=GRAY_A).next_to(lambda_brace, UP, buff=0.1)
 
-        # Rounded values for display
-        t_flight_display = round(t_flight, 2)
-        x_range_total_display = round(x_range_total, 2)
-        vx_display = round(vx, 2)
-        vy0_display = round(vy0, 2)
+        wave_diagram_group = VGroup(string_line, wave_path, fixed_end_left, fixed_end_right, length_brace, length_label, lambda_brace, lambda_label)
+        if wave_diagram_group.width > frame_width * 0.88:
+            wave_diagram_group.scale_to_fit_width(frame_width * 0.88)
+        if wave_diagram_group.height > middle_zone_height * 0.82:
+            wave_diagram_group.scale_to_fit_height(middle_zone_height * 0.82)
+        # Ensure it's not too small (BUG #4-ก)
+        if wave_diagram_group.width < frame_width * 0.55:
+            wave_diagram_group.scale_to_fit_width(frame_width * 0.55)
+        if wave_diagram_group.height < middle_zone_height * 0.55:
+            wave_diagram_group.scale_to_fit_height(middle_zone_height * 0.55)
+        wave_diagram_group.move_to(middle_center)
 
-        # --- Manim Objects ---
-        # Top Zone: Title and Problem
-        title_text = Text('การเคลื่อนที่แบบโพรเจกไทล์: ปาก้อนหินจากตึก (มุมก้ม)', font='TH Sarabun New', font_size=28, color=WHITE)
-        if title_text.width > frame_width * 0.88:
-            title_text.scale_to_fit_width(frame_width * 0.88)
-        if title_text.height > top_zone_height * 0.88:
-            title_text.scale_to_fit_height(top_zone_height * 0.88)
-        title_text.move_to(top_center)
+        # --- Mobjects for Step 1 ---
+        step1_title = VGroup(
+            Text('ขั้นตอนที่ 1:', font='TH Sarabun New', font_size=26, color=GOLD_B),
+            Text('หาความยาวคลื่น (\lambda)', font='TH Sarabun New', font_size=26, color=GOLD_B)
+        ).arrange(RIGHT, buff=0.15)
+        eq_lambda_half = MathTex('L = \\frac{\lambda}{2}', font_size=26, color=WHITE)
+        eq_lambda_val = MathTex('\\lambda = 2L = 2(0.4\,\mathrm{m}) = 0.8\,\mathrm{m}', font_size=26, color=WHITE)
+        step1_group = VGroup(step1_title, eq_lambda_half, eq_lambda_val).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
+        if step1_group.width > frame_width * 0.88:
+            step1_group.scale_to_fit_width(frame_width * 0.88)
+        if step1_group.height > bottom_zone_height * 0.88:
+            step1_group.scale_to_fit_height(bottom_zone_height * 0.88)
+        step1_group.move_to(bottom_center)
 
-        problem_q_thai = Text(
-            'ชายคนหนึ่งยืนอยู่บนดาดฟ้าตึกสูง 50 เมตร แล้วปาหินก้อนหินออกไปในแนวทำมุมก้ม 37 องศา\n' # Fixed string concatenation
-            'กับแนวระดับ ด้วยความเร็ว 25 เมตร/วินาที',
-            font='TH Sarabun New', font_size=26, color=WHITE,
-            line_spacing=0.8
+        # --- Mobjects for Step 2 ---
+        step2_title = VGroup(
+            Text('ขั้นตอนที่ 2:', font='TH Sarabun New', font_size=26, color=GOLD_B),
+            Text('หาอัตราเร็วคลื่น (V)', font='TH Sarabun New', font_size=26, color=GOLD_B)
+        ).arrange(RIGHT, buff=0.15)
+        eq_v_formula = MathTex('V = f\lambda', font_size=26, color=WHITE)
+        eq_v_sub = MathTex('V = (20\,\mathrm{Hz})(0.8\,\mathrm{m})', font_size=26, color=WHITE)
+        eq_v_result = MathTex('V = 16\,\mathrm{m/s}', font_size=26, color=GREEN_C)
+        step2_group = VGroup(step2_title, eq_v_formula, eq_v_sub, eq_v_result).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
+        if step2_group.width > frame_width * 0.88:
+            step2_group.scale_to_fit_width(frame_width * 0.88)
+        if step2_group.height > bottom_zone_height * 0.88:
+            step2_group.scale_to_fit_height(bottom_zone_height * 0.88)
+        step2_group.move_to(bottom_center)
+
+        # --- Mobjects for CTA ---
+        cta_text = Text('ลองฝึกทำโจทย์คลื่นนิ่งข้ออื่นๆ ดูนะครับ!', font='TH Sarabun New', font_size=28, color=WHITE)
+        if cta_text.width > frame_width * 0.88:
+            cta_text.scale_to_fit_width(frame_width * 0.88)
+        if cta_text.height > bottom_zone_height * 0.88:
+            cta_text.scale_to_fit_height(bottom_zone_height * 0.88)
+        cta_text.move_to(bottom_center)
+
+        # --- Animations ---
+        self.play(FadeIn(problem_text, shift=UP*0.15))
+        self.wait(6.0)
+
+        self.play(
+            FadeOut(problem_text, shift=DOWN*0.1),
+            Create(wave_diagram_group)
         )
-        problem_q_a = Text('ก. นานเท่าใดวัตถุจึงจะตกถึงพื้น', font='TH Sarabun New', font_size=26, color=WHITE)
-        problem_q_b = Text('ข. ก้อนหินตกห่างจากตัวตึกเท่าใด', font='TH Sarabun New', font_size=26, color=WHITE)
+        self.wait(8.0)
 
-        problem_text_group = VGroup(problem_q_thai, problem_q_a, problem_q_b).arrange(
-            DOWN, aligned_edge=LEFT, buff=0.15
+        self.play(FadeIn(step1_group, shift=UP*0.15))
+        self.wait(8.0)
+
+        self.play(
+            FadeOut(step1_group, shift=DOWN*0.1),
+            FadeIn(step2_group, shift=UP*0.15)
         )
-        # Rule 11: Every VGroup must pass scale_to_fit_width and scale_to_fit_height before move_to
-        problem_text_group.scale_to_fit_width(frame_width * 0.88)
-        problem_text_group.scale_to_fit_height(top_zone_height * 0.88)
-        problem_text_group.move_to(top_center)
+        self.wait(12.0)
 
-        # Middle Zone: Visualization
-        x_max_plot = np.ceil(x_range_total / 10) * 10 + 10
-        y_max_plot = np.ceil(h0 / 10) * 10 + 10
-        x_max_plot = max(x_max_plot, 50)
-        y_max_plot = max(y_max_plot, 60)
-
-        axes = Axes(
-            x_range=[0, x_max_plot, 10],
-            y_range=[0, y_max_plot, 15],
-            x_length=frame_width * 0.60,
-            y_length=middle_zone_height * 0.65,
-            axis_config={
-                'color': GRAY_C,
-                'stroke_width': 2,
-                'include_tip': True,
-                'tip_length': 0.15,
-                'tip_width': 0.10,
-            },
-            x_axis_config={'include_numbers': True, 'font_size': 16, 'color': GRAY_B},
-            y_axis_config={'include_numbers': True, 'font_size': 16, 'color': GRAY_B},
+        self.play(
+            FadeOut(wave_diagram_group, shift=DOWN*0.1),
+            FadeOut(step2_group, shift=DOWN*0.1),
+            FadeIn(cta_text, shift=UP*0.15)
         )
-        x_label = axes.get_x_axis_label(
-            Text('ระยะทางแนวราบ (m)', font='TH Sarabun New', font_size=18, color=GRAY_A),
-            edge=DOWN, direction=DOWN, buff=0.35
-        )
-        y_label = axes.get_y_axis_label(
-            Text('ความสูง (m)', font='TH Sarabun New', font_size=18, color=GRAY_A).rotate(90 * DEGREES),
-            edge=LEFT, direction=LEFT, buff=0.30
-        )
-        axes_labels = VGroup(x_label, y_label)
-
-        # Trajectory function
-        def trajectory(t):
-            x = vx * t
-            y = h0 + vy0 * t - 0.5 * g * t**2
-            return axes.coords_to_point(x, y)
-
-        trajectory_path = ParametricFunction(
-            lambda t: trajectory(t),
-            t_range=[0, t_flight],
-            color=TEAL_C,
-            stroke_width=4,
-        )
-
-        # Important points
-        start_point = axes.coords_to_point(0, h0)
-        end_point = axes.coords_to_point(x_range_total, 0)
-        
-        start_dot = Dot(start_point, color=ORANGE, radius=0.08)
-        end_dot = Dot(end_point, color=RED_C, radius=0.08)
-
-        # Initial velocity vector
-        arrow_scale = 0.8
-        initial_velocity_vector = Arrow(
-            start=start_point,
-            end=start_point + axes.x_axis.get_unit_size() * vx * arrow_scale * 0.1 + axes.y_axis.get_unit_size() * vy0 * arrow_scale * 0.1,
-            buff=0,
-            color=GREEN_C,
-            stroke_width=4,
-            max_tip_length_to_length_ratio=0.25
-        )
-
-        # Angle annotation
-        angle_arc = Arc(
-            start_angle=0,
-            angle=theta,
-            radius=0.5,
-            arc_center=start_point,
-            color=YELLOW_C,
-            stroke_width=3
-        )
-        # Rule 9: font_size for MathTex label (26-28), and fixed extra '}'
-        angle_label = MathTex(r'37^{\circ}', font_size=26, color=YELLOW_C).next_to(angle_arc, DR, buff=0.05)
-        
-        # Dashed lines for h0 and x_range_total
-        h0_line = DashedLine(axes.coords_to_point(0, 0), start_point, color=GRAY_A, stroke_width=2)
-        # Rule 9: font_size for MathTex and Text (26-28)
-        h0_label = VGroup(
-            MathTex(r'h_0 =', font_size=26, color=GRAY_A),
-            Text(f'{int(h0)} ม.', font='TH Sarabun New', font_size=26, color=GRAY_A)
-        ).arrange(RIGHT, buff=0.05).next_to(h0_line, LEFT, buff=0.1)
-
-        x_range_line = DashedLine(axes.coords_to_point(x_range_total, 0), end_point, color=GRAY_A, stroke_width=2)
-        # Rule 9: font_size for MathTex and Text (26-28)
-        x_range_label = VGroup(
-            MathTex(r'x =', font_size=26, color=GRAY_A),
-            Text(f'{x_range_total_display} ม.', font='TH Sarabun New', font_size=26, color=GRAY_A)
-        ).arrange(RIGHT, buff=0.05).next_to(x_range_line, DOWN, buff=0.1)
-
-        # Group all middle zone objects
-        axes_group = VGroup(axes, axes_labels, trajectory_path, start_dot, end_dot,
-                            initial_velocity_vector, angle_arc, angle_label,
-                            h0_line, h0_label, x_range_line, x_range_label)
-        
-        # Apply scaling and positioning for middle zone
-        # Rule 11: Unconditional scaling for VGroup before move_to
-        axes_group.scale_to_fit_width(frame_width * 0.88)
-        axes_group.scale_to_fit_height(middle_zone_height * 0.88) # Fixed 0.82 to 0.88 as per Rule 11
-        axes_group.move_to(middle_center) # Rule 11: move_to after scaling
-
-        # Add objects to the scene to prevent 'Render timed out' error.
-        # The error occurs because no Mobjects are added to the scene by default.
-        # Adding the main content VGroups will make the scene render successfully.
-        # Assuming problem_text_group is the primary content for the top zone.
-        self.add(problem_text_group)
-        self.add(axes_group)
+        self.wait(6.0)
+        self.play(FadeOut(cta_text, shift=DOWN*0.1))
