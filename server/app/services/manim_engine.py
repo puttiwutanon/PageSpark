@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── Keep this at 1 on free tier (20 RPD). Raise to 2-3 after adding billing.
-MAX_RETRIES = 1
+MAX_RETRIES = 2
 
 
 FIX_PROMPT_TEMPLATE = """
@@ -57,11 +57,25 @@ FIX_PROMPT_TEMPLATE = """
 14. ห้ามใช้ VGroup(*[Text(...) for line in [...]]) — เขียน Text() แยกบรรทัดใน VGroup()
 15. ถ้า Error คือ "Render timed out" ให้ลด ParametricFunction sampling หรือลด MathTex จำนวน
     ห้ามลบ self.play()/self.wait() จนวิดีโอสั้นกว่า 30 วินาที
+16. ห้ามใช้ .arrange(RIGHT) ระหว่าง Text ภาษาไทยยาว (เกิน 8 ตัวอักษร) กับ MathTex ในกลุ่มเดียวกัน
+    เพราะความกว้างรวมจะเกิน frame_width=9.0 เสมอ — ให้ใช้ .arrange(DOWN, aligned_edge=LEFT)
+    แทนเสมอ หรือย่อ label ให้สั้นลง (เช่น 'ก.' แทน 'ก. เวลาที่วัตถุตกถึงพื้น:')
+    แล้ววาง MathTex ด้านล่าง label นั้น
+17. ห้ามใช้ VGroup(*[Text(...) for line in [...]]) เด็ดขาด — ให้เขียน Text() แต่ละบรรทัด
+    เป็น argument ตรงๆ ของ VGroup() เช่น:
+    ✅ VGroup(Text('บรรทัด 1', ...), Text('บรรทัด 2', ...), Text('บรรทัด 3', ...))
+    ❌ VGroup(*[Text(line, ...) for line in ['บรรทัด 1', 'บรรทัด 2', 'บรรทัด 3']])
 
 ส่งคืนเฉพาะ JSON ที่มีฟิลด์ "manim_code_lines" เป็น array ของ string เท่านั้น
 ห้ามมีข้อความอื่นนอกจาก JSON เด็ดขาด:
 {{"manim_code_lines": ["import numpy as np", "from manim import *", ...]}}
 """
+
+COUNT_PROMPT = """
+    อ่านเนื้อหาที่ผู้ใช้ส่งมาและนับจำนวนโจทย์ฟิสิกส์ที่แยกจากกันได้ทั้งหมด
+    (แต่ละโจทย์ที่มีสถานการณ์หรือตัวเลขต่างกัน นับเป็น 1 โจทย์)
+    ส่งคืน JSON เท่านั้น: {"question_count": <number>, "question_titles": ["...", "..."]}
+    """
 
 
 class Manim_Engine:
@@ -143,12 +157,26 @@ class Manim_Engine:
                 response = self.gemini_client.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=prompt,
-                    config=types.GenerateContentConfig(temperature=0.2),
+                    config=types.GenerateContentConfig(
+                        temperature=0.2,
+                        response_mime_type="application/json",   # forces Gemini to properly escape all backslashes
+                    ),
                 )
                 raw = response.text.strip()
+
+                # Strip markdown fences if present
                 raw = re.sub(r"^```(?:json)?\s*", "", raw)
                 raw = re.sub(r"\s*```$", "", raw)
-                parsed = json.loads(raw)
+
+                # Gemini frequently outputs unescaped LaTeX backslashes
+                # e.g. \lambda \mathrm \circ — these are invalid JSON escape
+                # sequences and cause json.JSONDecodeError: Invalid \escape.
+                # Fix: double up any \ not followed by a valid JSON escape char.
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    fixed_raw = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw)
+                    parsed = json.loads(fixed_raw)   # raises normally if still broken
                 lines = parsed.get("manim_code_lines")
                 if isinstance(lines, list) and lines:
                     return lines
@@ -224,8 +252,7 @@ class Manim_Engine:
                 if fixed_lines is None:
                     return {
                         "status": "error",
-                        "message": "Gemini unavailable (quota/403). "
-                                   "Check aistudio.google.com/rate-limit.",
+                        "message": "Gemini fix returned no code (check logs — likely JSON parse error or quota). " + val.violation_summary()[:200],
                         "attempts": attempt,
                     }
                 current_data = dict(episode_data)
@@ -254,7 +281,7 @@ class Manim_Engine:
                 if fixed_lines is None:
                     return {
                         "status": "error",
-                        "message": "Gemini unavailable. " + safety_msg,
+                        "message": "Gemini fix returned no code (check logs — likely JSON parse error or quota). " + safety_msg[:200],
                         "attempts": attempt,
                     }
                 current_data["manim_code_lines"] = fixed_lines
@@ -282,8 +309,7 @@ class Manim_Engine:
             if fixed_lines is None:
                 return {
                     "status": "error",
-                    "message": "Gemini unavailable (quota/403). Render also failed: "
-                               + render_output[:200],
+                    "message": "Gemini fix returned no code (check logs — likely JSON parse error or quota). " + render_output[:200],
                     "attempts": attempt,
                 }
             current_data["manim_code_lines"] = fixed_lines
@@ -295,9 +321,31 @@ class Manim_Engine:
         }
 
     def render_all_episodes(self, lesson_json: dict) -> list[dict]:
+        """Render every episode in a lesson JSON response and return results list."""
         results = []
         for episode in lesson_json.get("episodes", []):
             result = self.render_episode(episode)
             result["episode_number"] = episode.get("episode_number")
             results.append(result)
         return results
+
+    def count_questions_first(self, page_content: str) -> int:
+        """Quick pre-scan to count questions before full generation."""
+        try:
+            response = self.gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=COUNT_PROMPT + "\n\nเนื้อหา:\n" + page_content,
+                config=types.GenerateContentConfig(temperature=0.1),
+            )
+            raw = response.text.strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+            data = json.loads(raw)
+            count = data.get("question_count", 1)
+            logger.info(f"Pre-scan: {count} question(s): {data.get('question_titles', [])}")
+            return count
+        except Exception as e:
+            logger.warning(f"Question count pre-scan failed: {e} — defaulting to 1")
+            return 1
+    
+

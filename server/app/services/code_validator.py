@@ -95,39 +95,66 @@ def _fix_text_in_mathtex(code: str, fixes: list[str]) -> str:
 
 def _fix_single_backslash_lambda(code: str, fixes: list[str]) -> str:
     r"""
-    Auto-fix: common single-backslash LaTeX commands that aren't in raw strings
-    and will cause SyntaxWarning (e.g. '\lambda' → '\\lambda').
-    Only applies to non-raw strings (doesn't start with r').
+    Auto-fix: common LaTeX backslash sequences in MathTex/Tex non-raw strings
+    (both plain 'string' and f'string') that cause SyntaxWarning in Python 3.12+.
+    Does NOT touch r'...' raw strings — those are fine as-is.
     """
-    # LaTeX commands that are also valid Python escape sequences causing SyntaxWarning
-    # \l, \f, \t, \n, \b, \a, \v, \, etc.
     dangerous_sequences = {
         r'\lambda': r'\\lambda',
+        r'\Lambda': r'\\Lambda',
         r'\frac': r'\\frac',
         r'\phi': r'\\phi',
+        r'\Phi': r'\\Phi',
         r'\Delta': r'\\Delta',
+        r'\delta': r'\\delta',
         r'\theta': r'\\theta',
+        r'\Theta': r'\\Theta',
         r'\pi': r'\\pi',
+        r'\Pi': r'\\Pi',
         r'\mathrm': r'\\mathrm',
+        r'\mathbf': r'\\mathbf',
         r'\cdot': r'\\cdot',
         r'\times': r'\\times',
         r'\sqrt': r'\\sqrt',
         r'\approx': r'\\approx',
+        r'\circ': r'\\circ',
+        r'\alpha': r'\\alpha',
+        r'\beta': r'\\beta',
+        r'\gamma': r'\\gamma',
+        r'\Gamma': r'\\Gamma',
+        r'\sigma': r'\\sigma',
+        r'\omega': r'\\omega',
+        r'\Omega': r'\\Omega',
+        r'\mu': r'\\mu',
+        r'\nu': r'\\nu',
+        r'\vec': r'\\vec',
+        r'\hat': r'\\hat',
+        r'\pm': r'\\pm',
+        r'\leq': r'\\leq',
+        r'\geq': r'\\geq',
+        r'\neq': r'\\neq',
+        r'\,': r'\\,',       # thin space — very common in MathTex, was missing!
+        r'\;': r'\\;',       # thick space
+        r'\!': r'\\!',       # negative space
     }
-    # Find MathTex/Tex calls with non-raw strings containing single backslash
-    # Pattern: MathTex('...\lambda...')  — note single backslash, no r prefix
-    pattern = re.compile(r"(MathTex|Tex)\s*\(\s*'([^']*)'")
+    # Match MathTex/Tex calls using plain or f-strings (NOT r-strings — those are fine)
+    # Groups: (1)=call name, (2)=optional f prefix, (3)=string content
+    pattern = re.compile(r"(MathTex|Tex)\s*\(\s*(f)?'([^']*)'")
+
     def replacer(m):
         call = m.group(1)
-        content = m.group(2)
+        f_prefix = m.group(2) or ''
+        content = m.group(3)
         original = content
         for bad, good in dangerous_sequences.items():
-            # bad has a real backslash; good has double backslash
             if bad in content:
                 content = content.replace(bad, good)
         if content != original:
-            fixes.append(f"AUTO-FIX: Added missing backslash escapes in {call}('{original[:40]}...')")
-        return f"{call}('{content}'"
+            fixes.append(
+                f"AUTO-FIX: Fixed backslash escapes in {call}({f_prefix}'{original[:40]}...')"
+            )
+        return f"{call}({f_prefix}'{content}'"
+
     return pattern.sub(replacer, code)
 
 
@@ -455,9 +482,116 @@ def preprocess_code(code_string: str) -> ValidationResult:
     violations.extend(_detect_axes_too_large(lines))
     violations.extend(_detect_font_size_too_large(lines))
     violations.extend(_detect_overlapping_labels(lines))
+    violations.extend(_detect_final_answer_arrange_right(lines))
+    violations.extend(_detect_vgroup_list_comprehension(lines))
+    violations.extend(_detect_unbalanced_latex_braces(lines))
 
     return ValidationResult(
         fixed_code=code,
         violations=violations,
         auto_fixes=auto_fixes,
     )
+
+
+def _detect_final_answer_arrange_right(lines: list[str]) -> list[Violation]:
+    """
+    Detect VGroup(...).arrange(RIGHT) calls where one member is a long Thai Text.
+    This causes overflow because Thai text + MathTex side-by-side exceeds frame_width.
+    The correct pattern is to put the label on one line and the MathTex below it (DOWN).
+    """
+    violations = []
+    # Find .arrange(RIGHT, ...) calls
+    for i, line in enumerate(lines, 1):
+        if '.arrange(RIGHT' in line:
+            # Check surrounding 5 lines above for Text() with Thai content and font_size >= 24
+            context = '\n'.join(lines[max(0, i-6):i])
+            thai_range = re.compile(r'[\u0E00-\u0E7F]{8,}')  # 8+ consecutive Thai chars
+            if thai_range.search(context) and 'Text(' in context:
+                violations.append(Violation(
+                    rule="ANSWER_ARRANGE_RIGHT_OVERFLOW",
+                    line=i,
+                    snippet=line.strip()[:80],
+                    description=(
+                        "พบ .arrange(RIGHT) ที่มี Text ภาษาไทยยาวในกลุ่มเดียวกัน — "
+                        "การวาง Thai Text + MathTex แนวนอน (RIGHT) จะทำให้แถวนั้นกว้างเกิน frame "
+                        "ต้องเปลี่ยนเป็น .arrange(DOWN, aligned_edge=LEFT) แทน หรือแบ่ง label "
+                        "ออกเป็น Text บรรทัดเดียว แล้วตาม MathTex บรรทัดถัดไป"
+                    )
+                ))
+    return violations
+
+def _detect_vgroup_list_comprehension(lines: list[str]) -> list[Violation]:
+    """
+    Detect VGroup(*[...]) or VGroup(*[Text(...) for line in list]) patterns.
+    These are banned because mismatched parentheses are extremely common and
+    cause SyntaxError: unmatched ')' that crash the security validator.
+    """
+    violations = []
+    pattern = re.compile(r'VGroup\s*\(\s*\*\s*\[')
+    for i, line in enumerate(lines, 1):
+        if pattern.search(line):
+            violations.append(Violation(
+                rule="VGROUP_LIST_COMPREHENSION",
+                line=i,
+                snippet=line.strip()[:80],
+                description=(
+                    "พบ VGroup(*[...]) หรือ VGroup(*[Text(...) for line in [...]]) — "
+                    "รูปแบบนี้มีความเสี่ยงสูงที่วงเล็บ ) จะไม่สมดุล ทำให้เกิด SyntaxError "
+                    "ต้องเปลี่ยนเป็น VGroup(Text('บรรทัด1', ...), Text('บรรทัด2', ...), ...) "
+                    "โดยเขียน Text() แต่ละบรรทัดเป็น argument ตรงๆ แทน"
+                )
+            ))
+    return violations
+
+def _detect_unbalanced_latex_braces(lines: list[str]) -> list[Violation]:
+    """
+    Detect MathTex/Tex strings with unbalanced { } braces.
+    e.g. r'37^{\\circ}}' has 1 opening { and 2 closing } — LaTeX error.
+    Only checks the LaTeX string content inside MathTex/Tex calls.
+    """
+    violations = []
+    # Match content inside MathTex(r'...') or Tex(r'...')
+    pattern = re.compile(r'(?:MathTex|Tex)\s*\(\s*r[\'"]([^\'"]*)[\'"]')
+    for i, line in enumerate(lines, 1):
+        for m in pattern.finditer(line):
+            latex_content = m.group(1)
+            # Count unescaped { and } (in raw string, \\ is one backslash in LaTeX)
+            # For brace counting, just count { vs }
+            opens = latex_content.count('{')
+            closes = latex_content.count('}')
+            if opens != closes:
+                violations.append(Violation(
+                    rule="UNBALANCED_LATEX_BRACES",
+                    line=i,
+                    snippet=line.strip()[:80],
+                    description=(
+                        f"วงเล็บปีกกา LaTeX ไม่สมดุล: พบ {opens} เปิด '{{' "
+                        f"แต่ {closes} ปิด '}}' ใน MathTex/Tex string "
+                        "จะทำให้ LaTeX compilation ล้มเหลว — ตรวจนับและแก้ให้สมดุล"
+                    )
+                ))
+    return violations
+
+def validate_episode_count(lesson_json: dict, expected_min: int = None) -> tuple[bool, str]:
+    """
+    Check that the episode count in the JSON matches the actual episodes array.
+    Optionally check against an expected minimum (e.g. from a pre-scan step).
+    """
+    declared = lesson_json.get("total_episodes", 0)
+    actual = len(lesson_json.get("episodes", []))
+    
+    if declared != actual:
+        return False, (
+            f"total_episodes={declared} but episodes array has {actual} items. "
+            "Gemini declared the wrong count — JSON is inconsistent."
+        )
+    
+    if expected_min and actual < expected_min:
+        return False, (
+            f"Only {actual} episode(s) generated but expected at least {expected_min}. "
+            "Gemini likely stopped after the first question."
+        )
+    
+    return True, "ok"
+
+

@@ -31,7 +31,7 @@ const HomeScreen = () => {
                 <FontAwesome5 name="chalkboard-teacher" size={24} color="white" />
             </TouchableOpacity>
 
-            <TouchableOpacity style={homeScreenStyle.routeToFunction} onPress={() => navigation.navigate('SignUp')}>
+            <TouchableOpacity style={homeScreenStyle.routeToFunction} onPress={() => navigation.navigate('quizz')}>
                 <AppText style={{ fontSize: 16, color: 'white' }}>ทำแบบทดสอบ</AppText>
                 <FontAwesome5 name="book" size={24} color="white" />
             </TouchableOpacity>
