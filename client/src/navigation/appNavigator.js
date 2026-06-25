@@ -11,8 +11,9 @@ import LoginScreen from '../screens/auth/loginScreen';
 import SignUpScreen from '../screens/auth/signupScreen';
 import Navbar from '../components/navbar'; 
 import CameraScreen from '../screens/main/cameraScreen';
-import QuizzScreen from '../screens/main/quizzScreen';
-import QuizzGeneratingScreen from '../screens/main/quizzGeneratingScreen';
+import QuizzScreen from '../screens/main/quiz/quizzScreen';
+import QuizzGeneratingScreen from '../screens/main/quiz/quizzGeneratingScreen';
+import QuizzPlayScreen from '../screens/main/quiz/quizzPlayScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -52,6 +53,7 @@ const [user, setUser] = useState(null);
             <Stack.Screen name="camera" component={CameraScreen} />
             <Stack.Screen name="quizz" component={QuizzScreen} />
             <Stack.Screen name="quizzGenerator" component={QuizzGeneratingScreen} />
+            <Stack.Screen name="quizzPlay" component={QuizzPlayScreen} />
           </>
         ) : (
           // ❌ No user: Only show Authentication screens

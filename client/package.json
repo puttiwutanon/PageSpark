@@ -25,11 +25,13 @@
     "firebase": "^12.14.0",
     "react": "19.2.3",
     "react-native": "0.85.3",
+    "react-native-element-dropdown": "^2.12.4",
     "react-native-gifted-charts": "^1.4.77",
     "react-native-linear-gradient": "^2.8.3",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "4.25.2",
-    "react-native-svg": "^15.15.5"
+    "react-native-svg": "^15.15.5",
+    "react-native-webview": "13.16.1"
   },
   "scripts": {
     "postinstall": "patch-package",

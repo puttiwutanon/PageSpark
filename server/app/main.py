@@ -14,8 +14,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
+from pydantic import BaseModel
+from typing import List
 
-from app.core.prompts import LESSON_SUMMARY_SYSTEM_INSTRUCTION
+from app.core.prompts import LESSON_SUMMARY_SYSTEM_INSTRUCTION, QUIZ_GENERATION_SYSTEM_INSTRUCTION
 from app.services.manim_engine import Manim_Engine
 from app.services.code_validator import validate_episode_count
 
@@ -41,6 +43,79 @@ app.add_middleware(
 
 client = genai.Client()
 engine = Manim_Engine(output_dir="renders")
+
+# ── Add this dictionary to map Frontend IDs to Thai Curriculum Topics ──
+TOPIC_MAPPER = {
+    'mechanics_1': 'กลศาสตร์ 1 (การเคลื่อนที่แนวตรง, นิวตัน, สมดุลกล)',
+    'mechanics_2': 'กลศาสตร์ 2 (งานและพลังงาน, โมเมนตัม, การเคลื่อนที่แนวโค้ง)',
+    'waves_light_sound': 'คลื่น เสียง และแสง',
+    'electricity_magnetism': 'ไฟฟ้าสถิต, ไฟฟ้ากระแส, และแม่เหล็ก',
+    'thermal_matter': 'ความร้อน แก๊ส และของไหล',
+    'modern_physics': 'ฟิสิกส์อะตอม, นิวเคลียร์ และฟิสิกส์อนุภาค'
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pydantic Schemas for Quiz Generation Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+class QuizRequest(BaseModel):
+    topics: List[str]
+    questions_per_topic: int = 5 # ── UPDATED: Replaced 'count' with 'questions_per_topic'
+
+class QuizItemSchema(BaseModel):
+    question: str
+    options: List[str]  
+    correct_answer: str 
+    step_by_step_solution: str
+
+class QuizResponseSchema(BaseModel):
+    quizzes: List[QuizItemSchema]
+
+# ... [TOPIC_MAPPER remains the same] ...
+
+@app.post("/api/generate-quiz", response_model=QuizResponseSchema)
+async def generate_quiz(request: QuizRequest):
+    """
+    Endpoint to generate custom academic physics quiz questions using structured outputs.
+    Ensures 100% JSON parsing compliance via Gemini schema controls.
+    """
+    try:
+        # Translate topics and build exact instructions for Gemini
+        translated_topics = [TOPIC_MAPPER.get(topic, topic) for topic in request.topics]
+        
+        # ── ADDED: Explicitly map the count to EACH topic to prevent AI confusion ──
+        topics_instructions = "\n".join([f"- {topic}: จำนวน {request.questions_per_topic} ข้อ" for topic in translated_topics])
+        total_questions = len(request.topics) * request.questions_per_topic
+
+        user_prompt = f"""
+        จงสร้างชุดข้อสอบปรนัยรายวิชาฟิสิกส์รวมทั้งหมด {total_questions} ข้อ โดยแบ่งจำนวนข้อตามหัวข้ออย่างเคร่งครัดดังนี้:
+        {topics_instructions}
+        
+        ข้อสอบจะต้องมีข้อที่เน้นแนวคิดความเข้าใจ และข้อคำนวณที่อิงจากหลักฟิสิกส์ ม.ปลาย ในระดับความยากที่เหมาะสม
+        """
+
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=QUIZ_GENERATION_SYSTEM_INSTRUCTION,
+                temperature=0.4,
+                response_mime_type="application/json",
+                response_schema=QuizResponseSchema, 
+            )
+        )
+
+        raw_response = response.text.strip()
+        parsed_data = json.loads(raw_response)
+        
+        print("\n" + "="*20 + f" GENERATED {total_questions} QUIZ QUESTIONS " + "="*20)
+        print(json.dumps(parsed_data, indent=2, ensure_ascii=False))
+        print("="*65 + "\n")
+
+        return parsed_data
+
+    except Exception as e:
+        logger.error(f"generate_quiz failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/ingest")
