@@ -129,7 +129,7 @@ const QuizzGeneratingScreen = () => {
       {/* Nav header */}
       <View style={styles.navHeader}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <FontAwesome5 name="arrow-left" size={18} color="#c6cdfc" />
+          <FontAwesome5 name="arrow-left" size={18} color="#fff" />
         </TouchableOpacity>
         <AppText style={styles.navTitle}>สร้างแบบทดสอบ</AppText>
         <View style={{ width: 32 }} />
@@ -183,7 +183,7 @@ const QuizzGeneratingScreen = () => {
                 <FontAwesome5
                   name={sel ? 'check-square' : 'square'}
                   size={20}
-                  color={sel ? '#c6cdfc' : '#555'}
+                  color={sel ? '#fff' : '#fff'}
                 />
                 <AppText style={[styles.topicName, sel && styles.topicNameSel]}>
                   {topic.name}
@@ -216,7 +216,7 @@ const QuizzGeneratingScreen = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#12131e',
+    experimental_backgroundImage: 'linear-gradient(360deg, #c9befc, #c6cdfc, #e2ddfd, #ece8fd)'
   },
   center: {
     alignItems: 'center',
@@ -232,14 +232,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 12,
     paddingBottom: 8,
+    marginTop: '10%'
   },
   backBtn: {
     padding: 6,
   },
   navTitle: {
     fontSize: 18,
-    fontWeight: '700',
-    color: '#e2e8f0',
+    color: '#fff',
   },
 
   // Form
@@ -265,22 +265,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 20,
-    backgroundColor: '#1e2035',
-    borderWidth: 1,
-    borderColor: '#2a2d4a',
+    backgroundColor: 'rgba(128, 128, 128, 0.27)',
   },
   pillActive: {
-    backgroundColor: '#5b63c4',
-    borderColor: '#5b63c4',
+    backgroundColor: 'rgba(128, 128, 128, 0.27)',
   },
   pillText: {
     color: '#888',
     fontSize: 14,
-    fontWeight: '500',
   },
   pillTextActive: {
     color: 'white',
-    fontWeight: '700',
   },
 
   hint: {
@@ -299,23 +294,19 @@ const styles = StyleSheet.create({
     gap: 12,
     padding: 14,
     borderRadius: 12,
-    backgroundColor: '#1e2035',
-    borderWidth: 1,
-    borderColor: '#2a2d4a',
+    backgroundColor: 'rgba(128, 128, 128, 0.27)',
   },
   topicItemSel: {
-    borderColor: '#5b63c4',
-    backgroundColor: '#1e2240',
+    backgroundColor: '#c6cdfc',
   },
   topicName: {
     flex: 1,
     fontSize: 14,
-    color: '#aaa',
+    color: '#fff',
     lineHeight: 20,
   },
   topicNameSel: {
     color: '#e2e8f0',
-    fontWeight: '600',
   },
 
   // Submit
@@ -324,7 +315,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 10,
-    backgroundColor: '#5b63c4',
+    backgroundColor: '#c6cdfc',
     paddingVertical: 16,
     borderRadius: 16,
     marginTop: 28,
@@ -335,7 +326,6 @@ const styles = StyleSheet.create({
   submitBtnText: {
     color: 'white',
     fontSize: 16,
-    fontWeight: '700',
   },
 
   // Loading

@@ -18,6 +18,7 @@ import {
   SafeAreaView,
   ScrollView,
   Animated,
+  SafeAreaViewBase,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import FontAwesome5 from '@expo/vector-icons/FontAwesome5';
@@ -29,9 +30,9 @@ import MathText from '../../../components/mathText'; // adjust path
 // ─────────────────────────────────────────────────────────────────────────────
 
 function OptionButton({ option, isAnswered, isSelected, isCorrect, onPress }) {
-  let bg = '#1e2035';
-  let border = '#2a2d4a';
-  let textColor = '#ccc';
+  let bg = ' rgba(128, 128, 128, 0.27)';
+  let border = '#ffffff00';
+  let textColor = '#fff';
 
   if (isAnswered) {
     if (isCorrect) {
@@ -83,13 +84,15 @@ function ResultsScreen({ questions, answers, score, onRetry, onExit }) {
         <AppText style={styles.scorePercent}>
           {Math.round((score / questions.length) * 100)}%
         </AppText>
+
         <View style={styles.scoreBtns}>
           <TouchableOpacity style={styles.retryBtn} onPress={onRetry}>
-            <FontAwesome5 name="redo" size={14} color="#c6cdfc" />
+            <FontAwesome5 name="redo" size={14} color="#fff" />
             <AppText style={styles.retryBtnText}>ทำอีกครั้ง</AppText>
           </TouchableOpacity>
+
           <TouchableOpacity style={styles.exitBtn} onPress={onExit}>
-            <FontAwesome5 name="home" size={14} color="#888" />
+            <FontAwesome5 name="home" size={14} color="#fff" />
             <AppText style={styles.exitBtnText}>กลับหน้าหลัก</AppText>
           </TouchableOpacity>
         </View>
@@ -222,7 +225,7 @@ const QuizzPlayScreen = () => {
   const progress  = ((currentIdx + 1) / questions.length) * 100;
 
   return (
-    <ScrollView style={styles.container}>
+    <SafeAreaView style={styles.container}>
       {/* Header */}
       <View style={styles.playHeader}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
@@ -292,7 +295,7 @@ const QuizzPlayScreen = () => {
           </View>
         )}
       </ScrollView>
-    </ScrollView>
+    </SafeAreaView>
   );
 };
 
@@ -303,7 +306,8 @@ const QuizzPlayScreen = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#12131e',
+    width: '100%',
+    experimental_backgroundImage: 'linear-gradient(360deg, #c9befc, #c6cdfc, #e2ddfd, #ece8fd)',
   },
 
   // Play header
@@ -314,6 +318,7 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 8,
     gap: 12,
+    marginTop: '10%'
   },
   backBtn: { padding: 4 },
   progressInfo: {
@@ -325,8 +330,8 @@ const styles = StyleSheet.create({
   progressText: { fontSize: 14, color: '#888' },
   scoreChip: {
     fontSize: 13,
-    color: '#c6cdfc',
-    backgroundColor: '#1e2035',
+    color: '#fff',
+    backgroundColor: 'rgba(128, 128, 128, 0.27)',
     paddingHorizontal: 10,
     paddingVertical: 3,
     borderRadius: 12,
@@ -335,14 +340,14 @@ const styles = StyleSheet.create({
   // Progress bar
   progressBar: {
     height: 3,
-    backgroundColor: '#1e2035',
+    backgroundColor: 'rgba(128, 128, 128, 0.27)',
     marginHorizontal: 16,
     borderRadius: 2,
     marginBottom: 4,
   },
   progressFill: {
     height: 3,
-    backgroundColor: '#5b63c4',
+    backgroundColor: '#c6cdfc',
     borderRadius: 2,
   },
 
@@ -353,15 +358,13 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   questionCard: {
-    backgroundColor: '#1e2035',
+    backgroundColor: 'rgba(128, 128, 128, 0.27)',
     borderRadius: 16,
     padding: 20,
-    borderWidth: 1,
-    borderColor: '#2a2d4a',
   },
   questionText: {
     fontSize: 16,
-    color: '#e2e8f0',
+    color: '#fff',
     lineHeight: 26,
   },
   options: { gap: 10 },
@@ -371,6 +374,7 @@ const styles = StyleSheet.create({
     padding: 14,
     borderRadius: 12,
     borderWidth: 1.5,
+    backgroundColor: 'rgba(128, 128, 128, 0.27)',
   },
   optionText: {
     flex: 1,
@@ -380,11 +384,9 @@ const styles = StyleSheet.create({
 
   // Mini explanation
   miniExplanation: {
-    backgroundColor: '#151628',
+    backgroundColor: 'rgba(128, 128, 128, 0.27)',
     borderRadius: 16,
     padding: 16,
-    borderWidth: 1,
-    borderColor: '#2a2d4a',
     gap: 8,
   },
   miniExHeader: {
@@ -395,7 +397,6 @@ const styles = StyleSheet.create({
   },
   miniExResult: {
     fontSize: 16,
-    fontWeight: '700',
   },
   miniExLabel: {
     fontSize: 13,
@@ -404,7 +405,7 @@ const styles = StyleSheet.create({
   },
   miniExText: {
     fontSize: 14,
-    color: '#bbb',
+    color: '#fff',
     lineHeight: 22,
   },
   nextBtn: {
@@ -412,29 +413,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    backgroundColor: '#5b63c4',
+    backgroundColor: '#c6cdfc',
     paddingVertical: 12,
     borderRadius: 12,
     marginTop: 4,
   },
   nextBtnText: {
     color: 'white',
-    fontWeight: '700',
     fontSize: 15,
   },
 
   // Results
   scoreBanner: {
     alignItems: 'center',
-    backgroundColor: '#1e2035',
+    backgroundColor: 'rgba(128, 128, 128, 0.27)',
     paddingVertical: 28,
     paddingHorizontal: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: '#2a2d4a',
     gap: 6,
   },
-  scoreLabel: { fontSize: 13, color: '#888', textTransform: 'uppercase', letterSpacing: 1 },
-  scoreBig:   { fontSize: 52, fontWeight: '800', color: '#c6cdfc' },
+  scoreLabel: { fontSize: 13, color: '#fff', textTransform: 'uppercase', letterSpacing: 1 },
+  scoreBig:   { fontSize: 52, fontWeight: '800', color: '#fff' },
   scorePercent: { fontSize: 16, color: '#888' },
   scoreBtns: {
     flexDirection: 'row',
@@ -445,44 +443,41 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: '#2a2d4a',
+    backgroundColor: '#c6cdfc',
     paddingHorizontal: 16,
     paddingVertical: 9,
     borderRadius: 20,
   },
-  retryBtnText: { color: '#c6cdfc', fontSize: 14, fontWeight: '600' },
+  retryBtnText: { color: '#fff', fontSize: 14, },
   exitBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: '#1a1b2e',
+    backgroundColor: '#c6cdfc',
     paddingHorizontal: 16,
     paddingVertical: 9,
     borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#2a2d4a',
   },
-  exitBtnText: { color: '#888', fontSize: 14 },
+  exitBtnText: { color: '#fff', fontSize: 14 },
 
-  reviewList: { padding: 16, gap: 16, paddingBottom: 48 },
+  reviewList: { padding: 16, gap: 16, paddingBottom: 48,  },
   reviewTitle: {
     fontSize: 16,
-    fontWeight: '700',
-    color: '#e2e8f0',
+    color: '#334155',
     marginBottom: 4,
   },
   reviewCard: {
     borderRadius: 16,
     padding: 16,
-    borderWidth: 1,
     gap: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.4)',
   },
   reviewCorrect: {
-    backgroundColor: '#0f2218',
+    backgroundColor: 'rgba(34, 197, 94, 0.16)',
     borderColor: '#1a4731',
   },
   reviewWrong: {
-    backgroundColor: '#1e0f16',
+    backgroundColor: 'rgba(248, 113, 113, 0.16)',
     borderColor: '#4c1528',
   },
   reviewHeader: {
@@ -497,14 +492,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  badgeCorrect: { backgroundColor: '#14532d' },
+  badgeCorrect: { backgroundColor: '#14532d9d' },
   badgeWrong:   { backgroundColor: '#4c0519' },
-  reviewNum: { color: 'white', fontSize: 12, fontWeight: '700' },
+  reviewNum: { color: 'white', fontSize: 12, },
   reviewQuestion: {
     fontSize: 14,
-    color: '#e2e8f0',
+    color: '#fff',
     lineHeight: 22,
-    fontWeight: '600',
   },
   reviewOption: {
     flexDirection: 'row',
@@ -517,7 +511,7 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   explanationBox: {
-    backgroundColor: '#0a0b14',
+    backgroundColor: 'rgba(128, 128, 128, 0.27)',
     borderRadius: 10,
     padding: 12,
     gap: 6,
@@ -528,13 +522,12 @@ const styles = StyleSheet.create({
   explanationLabel: {
     fontSize: 12,
     color: '#f0c040',
-    fontWeight: '700',
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
   explanationText: {
     fontSize: 13,
-    color: '#aaa',
+    color: '#fff',
     lineHeight: 22,
   },
 });

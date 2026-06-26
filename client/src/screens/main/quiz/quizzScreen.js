@@ -39,7 +39,7 @@ function QuizCard({ quiz, onPlay, onDelete }) {
     <TouchableOpacity style={cardStyles.card} onPress={() => onPlay(quiz)} activeOpacity={0.85}>
       <View style={cardStyles.left}>
         <View style={cardStyles.iconBox}>
-          <FontAwesome5 name="clipboard-list" size={20} color="#c6cdfc" />
+          <FontAwesome5 name="clipboard-list" size={20} color="#fff" />
         </View>
         <View style={cardStyles.info}>
           <AppText style={cardStyles.title} numberOfLines={2}>{quiz.title}</AppText>
@@ -181,14 +181,13 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     fontSize: 26,
-    fontWeight: '700',
-    color: '#e2e8f0',
+    color: '#334155',
   },
   createBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: '#5b63c4',
+    backgroundColor: 'rgba(128, 128, 128, 0.27)',
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 20,
@@ -196,7 +195,6 @@ const styles = StyleSheet.create({
   createBtnText: {
     color: 'white',
     fontSize: 14,
-    fontWeight: '600',
   },
   center: {
     flex: 1,
@@ -215,7 +213,6 @@ const styles = StyleSheet.create({
   },
   emptyTitle: {
     fontSize: 20,
-    fontWeight: '700',
     color: '#e2e8f0',
     marginTop: 12,
   },
@@ -229,7 +226,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    backgroundColor: '#5b63c4',
+    backgroundColor: 'rgba(128, 128, 128, 0.27)',
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderRadius: 24,
@@ -238,20 +235,17 @@ const styles = StyleSheet.create({
   emptyBtnText: {
     color: 'white',
     fontSize: 15,
-    fontWeight: '600',
   },
 });
 
 const cardStyles = StyleSheet.create({
   card: {
-    backgroundColor: '#1e2035',
+    backgroundColor: '#fff',
     borderRadius: 16,
     padding: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    borderWidth: 1,
-    borderColor: '#2a2d4a',
   },
   left: {
     flexDirection: 'row',
@@ -263,7 +257,7 @@ const cardStyles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 12,
-    backgroundColor: '#2a2d4a',
+    backgroundColor: 'rgba(128, 128, 128, 0.27)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -274,7 +268,7 @@ const cardStyles = StyleSheet.create({
   title: {
     fontSize: 15,
     fontWeight: '600',
-    color: '#e2e8f0',
+    color: '#334155',
     lineHeight: 20,
   },
   meta: {
