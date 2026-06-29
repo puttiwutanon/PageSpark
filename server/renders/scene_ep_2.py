@@ -28,173 +28,110 @@ class PhysicsScene(Scene):
         middle_center = np.array([0, middle_zone_center_y, 0])
         bottom_center = np.array([0, bottom_zone_center_y, 0])
 
-        # --- Problem Constants ---
-        L2_string = 3.0 # meters
-        lambda2 = 0.5 # meters
-        lambda2_quarter = lambda2 / 4 # 0.125 meters
-        lambda2_half = lambda2 / 2 # 0.25 meters
+        # Problem 59 variables
+        L_val = 1.25 # m
+        v_val = 160 # m/s
+        n_val = 1 # From diagram (1 loop)
+        lambda_val = 2 * L_val / n_val # 2.5 m
+        f_val = v_val / lambda_val # 64 Hz
 
-        nodes_from_antinode = []
-        antinodes_from_antinode = []
-        current_dist_node = lambda2_quarter
-        current_dist_antinode = lambda2_half
-        while current_dist_node <= L2_string:
-            nodes_from_antinode.append(current_dist_node)
-            current_dist_node += lambda2_half
-        while current_dist_antinode < L2_string: # Fixed end is a node, so it cannot be an antinode at L2_string
-            antinodes_from_antinode.append(current_dist_antinode)
-            current_dist_antinode += lambda2_half
-
-        nodes_str = ', '.join([f'{d:.3f}' for d in nodes_from_antinode])
-        antinodes_str = ', '.join([f'{d:.2f}' for d in antinodes_from_antinode])
-
-        # --- Mobjects for Hook ---
+        # Top Zone: Problem Statement
         problem_text = VGroup(
-            Text('เชือกเส้นหนึ่งยาว 3 เมตร ปลายข้างหนึ่งยึดติดกับกำแพง', font='TH Sarabun New', font_size=28, color=WHITE),
-            Text('จับปลายอีกข้างหนึ่งสะบัดขึ้นลงอย่างสม่ำเสมอ ทำให้เกิดคลื่น', font='TH Sarabun New', font_size=28, color=WHITE),
-            Text('มีความยาวคลื่น 0.5 เมตร จงหาระยะห่างระหว่างปลายเส้นเชือก', font='TH Sarabun New', font_size=28, color=WHITE),
-            Text('ที่สะบัดกับตำแหน่งบัพและปฏิบัพ', font='TH Sarabun New', font_size=28, color=WHITE)
+            Text('59. เชือกเบาเส้นหนึ่งยาว 1.25 เมตร ถูกขึงตึงที่ปลายทั้งสองข้าง เมื่อทำให้เชือกสั่น', font='TH Sarabun New', font_size=28, color=GRAY_A),
+            Text('วัดอัตราเร็วได้ 160 เมตรต่อวินาที ถ้าคลื่นในเส้นเชือกเกิดการสั่นพ้องได้ต้องให้', font='TH Sarabun New', font_size=28, color=GRAY_A),
+            Text('ความถี่เข้าไปเท่าไร', font='TH Sarabun New', font_size=28, color=GRAY_A),
         ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
         if problem_text.width > frame_width * 0.88:
             problem_text.scale_to_fit_width(frame_width * 0.88)
         if problem_text.height > top_zone_height * 0.88:
             problem_text.scale_to_fit_height(top_zone_height * 0.88)
         problem_text.move_to(top_center)
-
-        # --- Mobjects for Diagram Explain ---
-        # Generic standing wave diagram starting with an antinode on the right
-        # String line (conceptual, not necessarily 3m length for this visualization)
-        string_length_vis = 2.0 # Visual length for the diagram
-        string_line_vis = Line(start=[-string_length_vis/2, 0, 0], end=[string_length_vis/2, 0, 0], color=GRAY_C, stroke_width=2)
-
-        # Antinode at the right end of the visual string
-        antinode_pos_vis = string_length_vis / 2
-        vibrated_end_dot = Dot(point=[antinode_pos_vis, 0, 0], color=ORANGE, radius=0.08)
-        vibrated_end_label = Text('ปลายสะบัด (ปฏิบัพ)', font='TH Sarabun New', font_size=18, color=ORANGE).next_to(vibrated_end_dot, RIGHT, buff=0.1)
-
-        # Wave path (starting with antinode at the right, going left)
-        # Use a cosine wave shifted so antinode is at x=antinode_pos_vis
-        def wave_func_vis(x):
-            # Adjust phase to have antinode at antinode_pos_vis
-            # k = 2*pi/lambda. For antinode at x=0, use cos(kx). For antinode at x=L, use cos(k(x-L))
-            # Let's make the antinode at the rightmost point of the visual string
-            # and draw a few loops to the left.
-            # A full wavelength is 0.5m. Let's show 2 wavelengths for clarity.
-            # So, 2 * 0.5 = 1m. We want to show 2m length. So 4 wavelengths.
-            # Let's use a simple cosine wave, where the rightmost point is an antinode.
-            # x_relative = x - antinode_pos_vis
-            # return 0.15 * np.cos(2 * np.pi * x_relative / lambda2)
-            # Let's draw it from left to right, with antinode at the right.
-            # So, it's a sine wave if fixed at left, or cosine if antinode at left.
-            # Let's draw a wave that ends with an antinode on the right.
-            # y(x) = A cos(k(L-x)) for antinode at L, node at 0.
-            # Here, we want to show the pattern from an antinode. Let's make the antinode at x=0 for this visual.
-            # And then shift the whole group.
-            return 0.15 * np.cos(2 * np.pi * x / lambda2)
-
-        # Draw from -2*lambda2 to 0 (where 0 is the antinode)
-        wave_path_vis = ParametricFunction(lambda t: [t, wave_func_vis(t), 0], t_range=[-2*lambda2, 0], color=TEAL_C, stroke_width=4)
-        wave_path_vis.shift(RIGHT * antinode_pos_vis)
-
-        # Mark first Node and Antinode from the vibrated end (rightmost point)
-        first_node_pos = antinode_pos_vis - lambda2_quarter
-        first_antinode_pos = antinode_pos_vis - lambda2_half
-
-        first_node_dot = Dot(point=[first_node_pos, 0, 0], color=BLUE_C, radius=0.08)
-        first_node_label = Text('บัพ', font='TH Sarabun New', font_size=18, color=BLUE_C).next_to(first_node_dot, DOWN, buff=0.1)
-
-        first_antinode_dot = Dot(point=[first_antinode_pos, 0, 0], color=ORANGE, radius=0.08)
-        first_antinode_label = Text('ปฏิบัพ', font='TH Sarabun New', font_size=18, color=ORANGE).next_to(first_antinode_dot, UP, buff=0.1)
-
-        # Braces for distances
-        brace_lambda_quarter = Brace(Line([first_node_pos, 0, 0], [antinode_pos_vis, 0, 0]), direction=DOWN, buff=0.1)
-        label_lambda_quarter = MathTex('\\frac{\lambda}{4}', font_size=18, color=GRAY_A).next_to(brace_lambda_quarter, DOWN, buff=0.1)
-
-        brace_lambda_half = Brace(Line([first_antinode_pos, 0, 0], [antinode_pos_vis, 0, 0]), direction=UP, buff=0.1)
-        label_lambda_half = MathTex('\\frac{\lambda}{2}', font_size=18, color=GRAY_A).next_to(brace_lambda_half, UP, buff=0.1)
-
-        wave_diagram_group = VGroup(
-            string_line_vis, wave_path_vis, vibrated_end_dot, vibrated_end_label,
-            first_node_dot, first_node_label, first_antinode_dot, first_antinode_label,
-            brace_lambda_quarter, label_lambda_quarter, brace_lambda_half, label_lambda_half
-        )
-        if wave_diagram_group.width > frame_width * 0.88:
-            wave_diagram_group.scale_to_fit_width(frame_width * 0.88)
-        if wave_diagram_group.height > middle_zone_height * 0.82:
-            wave_diagram_group.scale_to_fit_height(middle_zone_height * 0.82)
-        # Ensure it's not too small (BUG #4-ก)
-        if wave_diagram_group.width < frame_width * 0.55:
-            wave_diagram_group.scale_to_fit_width(frame_width * 0.55)
-        if wave_diagram_group.height < middle_zone_height * 0.55:
-            wave_diagram_group.scale_to_fit_height(middle_zone_height * 0.55)
-        wave_diagram_group.move_to(middle_center)
-
-        # --- Mobjects for Step 1 ---
-        step1_title = VGroup(
-            Text('ขั้นตอนที่ 1:', font='TH Sarabun New', font_size=26, color=GOLD_B),
-            Text('หาระยะห่างจากปลายสะบัด (ปฏิบัพ) ไปยังบัพ', font='TH Sarabun New', font_size=26, color=GOLD_B)
-        ).arrange(DOWN, aligned_edge=LEFT, buff=0.08)
-        eq_nodes_general = MathTex('d_N = (2n-1)\\frac{\lambda}{4}', font_size=26, color=WHITE)
-        eq_nodes_values = VGroup(
-            Text('เมื่อ \\lambda = 0.5 m, จะได้ระยะห่าง (m):', font='TH Sarabun New', font_size=26, color=WHITE),
-            Text(nodes_str, font='TH Sarabun New', font_size=26, color=GREEN_C)
-        ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
-        step1_group = VGroup(step1_title, eq_nodes_general, eq_nodes_values).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
-        if step1_group.width > frame_width * 0.88:
-            step1_group.scale_to_fit_width(frame_width * 0.88)
-        if step1_group.height > bottom_zone_height * 0.88:
-            step1_group.scale_to_fit_height(bottom_zone_height * 0.88)
-        step1_group.move_to(bottom_center)
-
-        # --- Mobjects for Step 2 ---
-        step2_title = VGroup(
-            Text('ขั้นตอนที่ 2:', font='TH Sarabun New', font_size=26, color=GOLD_B),
-            Text('หาระยะห่างจากปลายสะบัด (ปฏิบัพ) ไปยังปฏิบัพอื่นๆ', font='TH Sarabun New', font_size=26, color=GOLD_B)
-        ).arrange(DOWN, aligned_edge=LEFT, buff=0.08)
-        eq_antinodes_general = MathTex('d_A = n\\frac{\lambda}{2}', font_size=26, color=WHITE)
-        eq_antinodes_values = VGroup(
-            Text('เมื่อ \\lambda = 0.5 m, จะได้ระยะห่าง (m):', font='TH Sarabun New', font_size=26, color=WHITE),
-            Text(antinodes_str, font='TH Sarabun New', font_size=26, color=GREEN_C),
-            Text('และที่ 3 เมตร คือตำแหน่งบัพ (ปลายตรึง)', font='TH Sarabun New', font_size=26, color=GRAY_A)
-        ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
-        step2_group = VGroup(step2_title, eq_antinodes_general, eq_antinodes_values).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
-        if step2_group.width > frame_width * 0.88:
-            step2_group.scale_to_fit_width(frame_width * 0.88)
-        if step2_group.height > bottom_zone_height * 0.88:
-            step2_group.scale_to_fit_height(bottom_zone_height * 0.88)
-        step2_group.move_to(bottom_center)
-
-        # --- Mobjects for CTA ---
-        cta_text = Text('ลองทบทวนและฝึกฝนเพิ่มเติมนะครับ!', font='TH Sarabun New', font_size=28, color=WHITE)
-        if cta_text.width > frame_width * 0.88:
-            cta_text.scale_to_fit_width(frame_width * 0.88)
-        if cta_text.height > bottom_zone_height * 0.88:
-            cta_text.scale_to_fit_height(bottom_zone_height * 0.88)
-        cta_text.move_to(bottom_center)
-
-        # --- Animations ---
         self.play(FadeIn(problem_text, shift=UP*0.15))
-        self.wait(11.0)
+        self.wait(1.5)
 
-        self.play(
-            FadeOut(problem_text, shift=DOWN*0.1),
-            Create(wave_diagram_group)
+        # Middle Zone: Visualization - Standing Wave (n=1)
+        string_line = Line(start=LEFT*3, end=RIGHT*3, color=WHITE, stroke_width=2)
+        left_wall = Line(start=string_line.get_left() + UP*0.5, end=string_line.get_left() + DOWN*0.5, color=GRAY_A, stroke_width=3)
+        right_wall = Line(start=string_line.get_right() + UP*0.5, end=string_line.get_right() + DOWN*0.5, color=GRAY_A, stroke_width=3)
+
+        standing_wave_upper = FunctionGraph(
+            lambda x: 0.8 * np.sin(np.pi * (x + 3) / 6), # 1 loop over length 6
+            x_range=[-3, 3],
+            color=BLUE_C
         )
-        self.wait(12.5)
-
-        self.play(FadeIn(step1_group, shift=UP*0.15))
-        self.wait(18.5)
-
-        self.play(
-            FadeOut(step1_group, shift=DOWN*0.1),
-            FadeIn(step2_group, shift=UP*0.15)
+        standing_wave_lower = FunctionGraph(
+            lambda x: -0.8 * np.sin(np.pi * (x + 3) / 6),
+            x_range=[-3, 3],
+            color=BLUE_C
         )
-        self.wait(20.0)
+        
+        brace_L = BraceBetweenPoints(string_line.get_left(), string_line.get_right(), direction=DOWN)
+        L_label = VGroup(
+            MathTex(r'L = ', font_size=26, color=GOLD_B),
+            MathTex(f'{L_val}\\\,\\\mathrm{{m}}', font_size=26, color=GOLD_B)
+        ).arrange(RIGHT, buff=0.1).next_to(brace_L, DOWN, buff=0.1)
 
-        self.play(
-            FadeOut(wave_diagram_group, shift=DOWN*0.1),
-            FadeOut(step2_group, shift=DOWN*0.1),
-            FadeIn(cta_text, shift=UP*0.15)
+        vis_group = VGroup(
+            string_line, left_wall, right_wall,
+            standing_wave_upper, standing_wave_lower,
+            brace_L, L_label
         )
-        self.wait(7.0)
-        self.play(FadeOut(cta_text, shift=DOWN*0.1))
+        
+        vis_group.scale_to_fit_width(frame_width * 0.88)
+        vis_group.scale_to_fit_height(middle_zone_height * 0.82)
+        if vis_group.width < frame_width * 0.55:
+            vis_group.scale_to_fit_width(frame_width * 0.55)
+        if vis_group.height < middle_zone_height * 0.55:
+            vis_group.scale_to_fit_height(middle_zone_height * 0.55)
+        vis_group.move_to(middle_center)
+
+        self.play(Create(string_line), Create(left_wall), Create(right_wall))
+        self.play(Create(standing_wave_upper), Create(standing_wave_lower))
+        self.play(GrowFromCenter(brace_L), Write(L_label))
+        self.wait(2)
+
+        # Bottom Zone: Calculations
+        step1_title = Text('ขั้นตอนที่ 1: หาความยาวคลื่น (λ)', font='TH Sarabun New', font_size=26, color=BLUE_D)
+        eq1_text = Text('จากรูปคลื่นนิ่ง 1 ลูป (n=1):', font='TH Sarabun New', font_size=26, color=WHITE)
+        eq1 = MathTex(r'L = n\\frac{\\lambda}{2}', font_size=26, color=WHITE)
+        eq1_sub = MathTex(r'1.25 = 1 \\times \\frac{\\lambda}{2}', font_size=26, color=WHITE)
+        eq1_res = MathTex(r'\\lambda = 2 \\times 1.25 = 2.5\\,\\mathrm{m}', font_size=26, color=GREEN_C)
+
+        step_group1 = VGroup(step1_title, eq1_text, eq1, eq1_sub, eq1_res).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
+        step_group1.scale_to_fit_width(frame_width * 0.88)
+        step_group1.scale_to_fit_height(bottom_zone_height * 0.88)
+        step_group1.move_to(bottom_center)
+
+        self.play(FadeIn(step1_title, shift=UP*0.15))
+        self.play(Write(eq1_text))
+        self.play(Write(eq1))
+        self.wait(1.5)
+        self.play(TransformMatchingTex(eq1, eq1_sub))
+        self.wait(1.5)
+        self.play(TransformMatchingTex(eq1_sub, eq1_res))
+        self.wait(2.5)
+
+        step2_title = Text('ขั้นตอนที่ 2: หาความถี่ (f)', font='TH Sarabun New', font_size=26, color=BLUE_D)
+        eq2 = MathTex(r'v = f\\lambda', font_size=26, color=WHITE)
+        eq2_sub = MathTex(r'160 = f \\times 2.5', font_size=26, color=WHITE)
+        
+        final_result_text = Text('ความถี่ f = ', font='TH Sarabun New', font_size=26, color=GREEN_C)
+        final_result_math = MathTex(r'64\\,\\mathrm{Hz}', font_size=26, color=GREEN_C)
+        eq2_res_group = VGroup(final_result_text, final_result_math).arrange(RIGHT, buff=0.1)
+
+        step_group2 = VGroup(step2_title, eq2, eq2_sub, eq2_res_group).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
+        step_group2.scale_to_fit_width(frame_width * 0.88)
+        step_group2.scale_to_fit_height(bottom_zone_height * 0.88)
+        step_group2.move_to(bottom_center)
+
+        self.play(FadeOut(step_group1, shift=DOWN*0.1), FadeIn(step_group2, shift=UP*0.1))
+        self.wait(1.5)
+        self.play(Write(eq2))
+        self.wait(1.5)
+        self.play(TransformMatchingTex(eq2, eq2_sub))
+        self.wait(1.5)
+        self.play(FadeOut(eq2_sub, shift=DOWN*0.1), FadeIn(eq2_res_group, shift=UP*0.1))
+        self.wait(2.5)
+
+        self.play(FadeOut(problem_text, shift=DOWN*0.1), FadeOut(step_group2, shift=DOWN*0.1))
+        self.wait(1)

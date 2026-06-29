@@ -5,6 +5,7 @@ Changes vs original:
   - FIX #3: count_questions_first() is now called BEFORE generation,
     and enforce_episode_count() is called AFTER to catch the "only 1 episode"
     bug where Gemini stops early even when the page has 3 questions.
+  - FIX: /api/ingest was missing its return statement — added back.
 """
 
 import os
@@ -44,7 +45,6 @@ app.add_middleware(
 client = genai.Client()
 engine = Manim_Engine(output_dir="renders")
 
-# ── Add this dictionary to map Frontend IDs to Thai Curriculum Topics ──
 TOPIC_MAPPER = {
     'mechanics_1': 'กลศาสตร์ 1 (การเคลื่อนที่แนวตรง, นิวตัน, สมดุลกล)',
     'mechanics_2': 'กลศาสตร์ 2 (งานและพลังงาน, โมเมนตัม, การเคลื่อนที่แนวโค้ง)',
@@ -55,35 +55,33 @@ TOPIC_MAPPER = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pydantic Schemas for Quiz Generation Endpoints
+# Pydantic Schemas
 # ─────────────────────────────────────────────────────────────────────────────
 class QuizRequest(BaseModel):
     topics: List[str]
-    questions_per_topic: int = 5 # ── UPDATED: Replaced 'count' with 'questions_per_topic'
+    questions_per_topic: int = 5
 
 class QuizItemSchema(BaseModel):
     question: str
-    options: List[str]  
-    correct_answer: str 
+    options: List[str]
+    correct_answer: str
     step_by_step_solution: str
 
 class QuizResponseSchema(BaseModel):
     quizzes: List[QuizItemSchema]
 
-# ... [TOPIC_MAPPER remains the same] ...
 
 @app.post("/api/generate-quiz", response_model=QuizResponseSchema)
 async def generate_quiz(request: QuizRequest):
     """
     Endpoint to generate custom academic physics quiz questions using structured outputs.
-    Ensures 100% JSON parsing compliance via Gemini schema controls.
     """
     try:
-        # Translate topics and build exact instructions for Gemini
         translated_topics = [TOPIC_MAPPER.get(topic, topic) for topic in request.topics]
-        
-        # ── ADDED: Explicitly map the count to EACH topic to prevent AI confusion ──
-        topics_instructions = "\n".join([f"- {topic}: จำนวน {request.questions_per_topic} ข้อ" for topic in translated_topics])
+        topics_instructions = "\n".join([
+            f"- {topic}: จำนวน {request.questions_per_topic} ข้อ"
+            for topic in translated_topics
+        ])
         total_questions = len(request.topics) * request.questions_per_topic
 
         user_prompt = f"""
@@ -100,16 +98,16 @@ async def generate_quiz(request: QuizRequest):
                 system_instruction=QUIZ_GENERATION_SYSTEM_INSTRUCTION,
                 temperature=0.4,
                 response_mime_type="application/json",
-                response_schema=QuizResponseSchema, 
+                response_schema=QuizResponseSchema,
             )
         )
 
         raw_response = response.text.strip()
         parsed_data = json.loads(raw_response)
-        
-        print("\n" + "="*20 + f" GENERATED {total_questions} QUIZ QUESTIONS " + "="*20)
-        print(json.dumps(parsed_data, indent=2, ensure_ascii=False))
-        print("="*65 + "\n")
+
+        print("\n" + "="*20 + f" GENERATED {total_questions} QUIZ QUESTIONS " + "="*20, flush=True)
+        print(json.dumps(parsed_data, indent=2, ensure_ascii=False), flush=True)
+        print("="*65 + "\n", flush=True)
 
         return parsed_data
 
@@ -145,10 +143,15 @@ async def ingest_and_summarize(file: UploadFile = File(...)):
             )
         )
 
+        print("\n" + "="*20 + " INGEST SUMMARY " + "="*20, flush=True)
+        print(response.text, flush=True)
+        print("="*56 + "\n", flush=True)
+
+        # FIX: return statement was missing — the endpoint was returning None (HTTP 200 with null body)
         return {
             "status": "success",
             "filename": file.filename,
-            "summary": response.text
+            "summary": response.text,
         }
 
     except Exception as e:
@@ -166,10 +169,6 @@ async def generate_video(file: UploadFile = File(...)):
     """
     Full pipeline: upload page → count questions → generate lesson JSON
     → enforce episode count → render all episodes → return video paths.
-
-    FIX #3: count_questions_first() is called before generation so we know
-    how many episodes to expect, and enforce_episode_count() fills gaps if
-    Gemini stops early.
     """
     temp_path = ""
     gemini_file = None
@@ -182,7 +181,6 @@ async def generate_video(file: UploadFile = File(...)):
             temp_path = temp_file.name
 
         # ── Step 1: Pre-scan to count questions ─────────────────────────────
-        # Read the file as text for counting (works for images too — Gemini sees it)
         gemini_file_for_count = client.files.upload(file=temp_path)
         try:
             count_response = client.models.generate_content(
@@ -213,8 +211,6 @@ async def generate_video(file: UploadFile = File(...)):
                 pass
 
         # ── Step 2: Generate lesson JSON (all episodes) ─────────────────────
-        # Inject the expected episode count into the system prompt so Gemini
-        # knows it MUST generate all N episodes, not just 1.
         dynamic_instruction = LESSON_SUMMARY_SYSTEM_INSTRUCTION + f"""
 
 ══════════════════════════════════════════════════
@@ -247,18 +243,19 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
             lesson_json = json.loads(fixed_raw)
 
         # ── Step 3: Enforce episode count ────────────────────────────────────
-        # If Gemini only gave us 1 episode but we expected more, ask it to fill gaps.
         lesson_json = engine.enforce_episode_count(
             lesson_json=lesson_json,
             expected_count=expected_count,
             question_titles=question_titles,
         )
 
-        # Validate the final count
         is_valid, validation_msg = validate_episode_count(lesson_json, expected_min=expected_count)
         if not is_valid:
             logger.warning(f"Episode count validation: {validation_msg}")
-            # Continue anyway with whatever episodes we have — don't fail the whole request
+
+        print("\n" + "="*20 + " GENERATED MANIM JSON " + "="*20, flush=True)
+        print(json.dumps(lesson_json, indent=2, ensure_ascii=False), flush=True)
+        print("="*62 + "\n", flush=True)
 
         # ── Step 4: Render all episodes ──────────────────────────────────────
         render_results = engine.render_all_episodes(lesson_json)

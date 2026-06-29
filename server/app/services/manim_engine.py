@@ -1,7 +1,3 @@
-"""
-server/app/services/manim_engine.py
-"""
-
 import subprocess
 import os
 import re
@@ -14,19 +10,64 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 from app.services.code_validator import preprocess_code
+from pydantic import BaseModel
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── Keep this at 1 on free tier (20 RPD). Raise to 2-3 after adding billing.
 MAX_RETRIES = 2
+
+
+def smart_json_sanitize(raw: str) -> str:
+    """
+    Robust JSON sanitizer for Gemini responses that contain Manim/Python code.
+
+    Problem: Gemini embeds Python code in JSON strings. LaTeX backslash sequences
+    like \\frac, \\lambda create invalid JSON escapes:
+      - \\f: JSON treats this as form feed (valid!) then "rac{..." is orphaned
+      - \\l: JSON treats this as invalid escape → JSONDecodeError
+      - \\t: JSON treats this as tab (valid!) then "heta" is orphaned
+
+    Strategy:
+      1. Protect already-doubled backslashes (\\\\ → placeholder)
+      2. Protect valid \\uXXXX unicode escapes (\\u0e02 etc.)
+      3. Double all remaining single backslashes
+      4. Restore protected sequences
+
+    This handles BOTH cases:
+      - Gemini outputs single \\ (wrong): \frac → \\frac ✓
+      - Gemini outputs double \\\\ (correct): \\frac → \\frac (unchanged) ✓
+    """
+    DB_PLACEHOLDER = '\x00__DB__\x00'   # for already-doubled backslashes
+    UNI_PLACEHOLDER = '\x00__UNI__\x00'  # for \\uXXXX sequences
+
+    # Step 1: protect already-doubled backslashes (\\\\ in raw string = \\ in JSON)
+    raw = raw.replace('\\\\', DB_PLACEHOLDER)
+
+    # Step 2: protect valid \\uXXXX unicode escapes (which are now \\u after step 1)
+    # After step 1, any \\uXXXX that was originally \uXXXX is now just \uXXXX
+    # We need to protect those
+    raw = re.sub(
+        r'\\u[0-9a-fA-F]{4}',
+        lambda m: UNI_PLACEHOLDER + m.group(0)[2:],  # store the 4 hex chars
+        raw
+    )
+
+    # Step 3: double all remaining single backslashes
+    raw = raw.replace('\\', '\\\\')
+
+    # Step 4: restore
+    raw = raw.replace(DB_PLACEHOLDER, '\\\\')
+    raw = raw.replace(UNI_PLACEHOLDER, '\\u')
+
+    return raw
 
 
 FIX_PROMPT_TEMPLATE = """
 คุณเป็น Manim developer ระดับ senior ที่แก้บั๊กได้เก่งมาก
 
-โค้ด Manim ด้านล่างนี้รันแล้วเกิด Error ต่อไปนี้:
+โค้ด Manim ด้านล่างนี้รันแล้วเกิด Error:
 
 === ERROR ===
 {error_message}
@@ -38,38 +79,54 @@ FIX_PROMPT_TEMPLATE = """
 {original_code}
 ========================
 
-กรุณาแก้ไขโค้ดให้ถูกต้องและรันผ่านโดยไม่มี Error ใดๆ โดยปฏิบัติตามกฎเหล็กต่อไปนี้:
+══ กฎเหล็ก — ดูตัวอย่างก่อน/หลังแล้วแก้ตามนี้เสมอ ══
 
-1. ห้ามใส่ภาษาไทยใน MathTex() หรือ Tex() หรือ \\mathrm{{}} เด็ดขาด
-2. ห้ามใส่ LaTeX syntax เช่น \\( \\lambda \\) ใน Text() เด็ดขาด
-3. ห้ามใช้ \\text{{}} ใน MathTex() — ใช้ \\mathrm{{}} เท่านั้น (แต่ห้ามใส่ Thai ใน \\mathrm)
-4. bottom_center ต้องใช้ bottom_zone_center_y ไม่ใช่ bottom_zone_bottom
-5. ทุก .move_to() ต้องใช้ numpy array [x, y, z] ไม่ใช่ scalar
-6. BraceBetweenPoints ต้องใช้จุดที่อยู่ในแนวนอนเดียวกัน ห้ามวาดทแยงมุม
-7. ห้ามมี include_numbers ใน axis_config (ใส่แค่ใน x_axis_config / y_axis_config)
-8. font_size: สมการ/หัวข้อ = 26-28, label แกน = 16-18, tick = 14-16
-9. axes x_length ≤ frame_width * 0.65, y_length ≤ middle_zone_height * 0.65
-10. ทุก VGroup ต้องผ่าน scale_to_fit_width(frame_width * 0.88) และ
-    scale_to_fit_height(zone_height * 0.88) ก่อน move_to() เสมอ
-11. ห้ามใช้ axes.get_graph() — ใช้ axes.plot() หรือ ParametricFunction
-12. ห้ามใช้ ShowCreation() — ใช้ Create()
-13. import numpy as np ต้องอยู่บรรทัดแรก
-14. ห้ามใช้ VGroup(*[Text(...) for line in [...]]) — เขียน Text() แยกบรรทัดใน VGroup()
-15. ถ้า Error คือ "Render timed out" ให้ลด ParametricFunction sampling หรือลด MathTex จำนวน
-    ห้ามลบ self.play()/self.wait() จนวิดีโอสั้นกว่า 30 วินาที
-16. ห้ามใช้ .arrange(RIGHT) ระหว่าง Text ภาษาไทยยาว (เกิน 8 ตัวอักษร) กับ MathTex ในกลุ่มเดียวกัน
-    เพราะความกว้างรวมจะเกิน frame_width=9.0 เสมอ — ให้ใช้ .arrange(DOWN, aligned_edge=LEFT)
-    แทนเสมอ หรือย่อ label ให้สั้นลง (เช่น 'ก.' แทน 'ก. เวลาที่วัตถุตกถึงพื้น:')
-    แล้ววาง MathTex ด้านล่าง label นั้น
-17. ห้ามใช้ VGroup(*[Text(...) for line in [...]]) เด็ดขาด — ให้เขียน Text() แต่ละบรรทัด
-    เป็น argument ตรงๆ ของ VGroup() เช่น:
-    ✅ VGroup(Text('บรรทัด 1', ...), Text('บรรทัด 2', ...), Text('บรรทัด 3', ...))
-    ❌ VGroup(*[Text(line, ...) for line in ['บรรทัด 1', 'บรรทัด 2', 'บรรทัด 3']])
+❌ WRONG — VGroup(*[...]) list comprehension:
+    lines = ['A', 'B', 'C']
+    VGroup(*[Text(line, font='TH Sarabun New', font_size=26) for line in lines])
+✅ CORRECT:
+    VGroup(
+        Text('A', font='TH Sarabun New', font_size=26, color=GRAY_A),
+        Text('B', font='TH Sarabun New', font_size=26, color=GRAY_A),
+        Text('C', font='TH Sarabun New', font_size=26, color=GRAY_A),
+    ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
 
-ส่งคืนเฉพาะ JSON ที่มีฟิลด์ "manim_code_lines" เป็น array ของ string เท่านั้น
-ห้ามมีข้อความอื่นนอกจาก JSON เด็ดขาด:
+❌ WRONG — LaTeX ใน Text():
+    Text('หาความยาวคลื่น (\\lambda)', ...)
+✅ CORRECT — ใช้ unicode:
+    Text('หาความยาวคลื่น (λ)', font='TH Sarabun New', font_size=26, color=GOLD_B)
+
+❌ WRONG — Thai ใน MathTex() หรือ \\text{{Thai}}:
+    MathTex(r'\\text{{ระยะห่างบัพ}} = \\frac{{\\lambda}}{{2}}', ...)
+    MathTex(r'\\mathrm{{วินาที}}', ...)
+✅ CORRECT — แยก Thai ออกเป็น VGroup(Text, MathTex):
+    VGroup(
+        Text('ระยะห่างบัพ', font='TH Sarabun New', font_size=26, color=WHITE),
+        MathTex(r'= \\frac{{\\lambda}}{{2}}', font_size=26, color=WHITE),
+    ).arrange(RIGHT, buff=0.1)
+
+❌ WRONG — .move_to(scalar):
+    group.move_to(bottom_zone_center_y)
+✅ CORRECT:
+    group.move_to(bottom_center)   # or np.array([0, bottom_zone_center_y, 0])
+
+❌ WRONG — .arrange(RIGHT) กับ Text ไทยยาว:
+    VGroup(Text('ก. เวลาที่วัตถุตกถึงพื้น:', ...), MathTex(...)).arrange(RIGHT)
+✅ CORRECT:
+    VGroup(Text('ก. เวลาที่วัตถุตกถึงพื้น:', ...), MathTex(...)).arrange(DOWN, aligned_edge=LEFT)
+
+กฎอื่น:
+- import numpy as np บรรทัดแรก
+- ShowCreation → Create, TexMobject → MathTex, get_graph → plot
+- ห้าม font= ใน MathTex()/Tex()
+- ห้าม include_numbers ใน axis_config
+- ทุก VGroup: scale_to_fit_width(frame_width*0.88) แล้ว move_to(zone_center)
+- MathTex ใช้ r-string: MathTex(r'\\frac{{1}}{{2}}', ...)
+
+ส่งคืนเฉพาะ JSON เท่านั้น ห้ามมีข้อความอื่น:
 {{"manim_code_lines": ["import numpy as np", "from manim import *", ...]}}
 """
+
 
 COUNT_PROMPT = """
     อ่านเนื้อหาที่ผู้ใช้ส่งมาและนับจำนวนโจทย์ฟิสิกส์ที่แยกจากกันได้ทั้งหมด
@@ -93,9 +150,12 @@ class Manim_Engine:
         try:
             tree = ast.parse(code_string)
         except SyntaxError as exc:
-            bad_line = code_string.splitlines()[exc.lineno - 1] if exc.lineno else ""
+            bad_line = ""
+            if exc.lineno:
+                code_lines = code_string.splitlines()
+                if exc.lineno - 1 < len(code_lines):
+                    bad_line = code_lines[exc.lineno - 1]
             return False, f"SyntaxError: {exc} | offending line: {bad_line.strip()}"
-
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -144,78 +204,113 @@ class Manim_Engine:
                 f"{violation_summary}\n"
                 f"======================="
             )
-
         prompt = FIX_PROMPT_TEMPLATE.format(
-            error_message=error_message[:4000],
+            error_message=error_message[:3000],
             original_code=original_code[:8000],
             violation_block=violation_block,
         )
 
-        # Exponential backoff for rate-limit errors (2s → 4s → 8s)
         for backoff in range(3):
             try:
                 response = self.gemini_client.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=prompt,
                     config=types.GenerateContentConfig(
-                        temperature=0.2,
-                        response_mime_type="application/json",   # forces Gemini to properly escape all backslashes
+                        temperature=0.1,
+                        response_mime_type="application/json",
                     ),
                 )
                 raw = response.text.strip()
-
                 # Strip markdown fences if present
-                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"^```(?:json|python)?\s*", "", raw)
                 raw = re.sub(r"\s*```$", "", raw)
 
-                # Gemini frequently outputs unescaped LaTeX backslashes
-                # e.g. \lambda \mathrm \circ — these are invalid JSON escape
-                # sequences and cause json.JSONDecodeError: Invalid \escape.
-                # Fix: double up any \ not followed by a valid JSON escape char.
+                # Apply smart sanitizer BEFORE json.loads
+                raw = smart_json_sanitize(raw)
+
                 try:
                     parsed = json.loads(raw)
-                except json.JSONDecodeError:
-                    fixed_raw = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw)
-                    parsed = json.loads(fixed_raw)   # raises normally if still broken
+                except json.JSONDecodeError as e:
+                    logger.error(f"Gemini fix JSON parse failed after sanitize: {e}")
+                    logger.error(f"Sanitized raw (first 300): {raw[:300]}")
+                    return None
+
                 lines = parsed.get("manim_code_lines")
                 if isinstance(lines, list) and lines:
                     return lines
-                logger.warning("Gemini fix response had no manim_code_lines.")
+                logger.warning("Gemini fix response had no manim_code_lines field.")
                 return None
 
             except Exception as exc:
                 err_str = str(exc)
-
-                # ── Rate limit (429) — wait and retry ──────────────────────
-                if any(x in err_str for x in ["429", "RESOURCE_EXHAUSTED", "quota"]):
-                    wait = 2 ** (backoff + 1)   # 2, 4, 8 seconds
+                if any(x in err_str for x in [
+                    "429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "quota", "overloaded",
+                ]):
+                    wait = 2 ** (backoff + 1)
                     logger.warning(
-                        f"Gemini rate limit hit. Waiting {wait}s "
-                        f"(backoff {backoff + 1}/3)..."
+                        f"Gemini transient error ({err_str[:60]}). "
+                        f"Waiting {wait}s (backoff {backoff + 1}/3)..."
                     )
                     time.sleep(wait)
                     continue
-
-                # ── Daily quota / permission denied (403) — stop immediately ─
                 if any(x in err_str for x in ["403", "PERMISSION_DENIED", "denied"]):
                     logger.error(
-                        "Gemini API access denied (403 / PERMISSION_DENIED).\n"
-                        "Your daily free-tier quota is likely exhausted (20 RPD).\n"
-                        "Fix options:\n"
-                        "  1. Wait until quota resets (midnight Pacific time)\n"
-                        "  2. Create a new API key in a DIFFERENT Google Cloud project\n"
-                        "     at aistudio.google.com (not just a new key in the same project)\n"
-                        "  3. Add billing to your current project at aistudio.google.com/billing\n"
-                        f"Original error: {exc}"
+                        "Gemini API quota exhausted (403). "
+                        "Wait until midnight Pacific or add billing.\n"
+                        f"Error: {exc}"
                     )
-                    return None  # Don't retry — quota is gone for today
-
-                # ── Any other error ─────────────────────────────────────────
-                logger.error(f"Gemini fix request failed: {exc}")
+                    return None
+                logger.error(f"Gemini fix failed (non-retryable): {exc}")
                 return None
 
-        logger.error("Gemini: exhausted all backoff retries on rate limit.")
+        logger.error("Gemini: exhausted all backoff retries.")
         return None
+
+    def enforce_episode_count(
+        self,
+        lesson_json: dict,
+        expected_count: int,
+        question_titles: list[str] | None = None,
+    ) -> dict:
+        episodes = lesson_json.get("episodes", [])
+        actual = len(episodes)
+        if actual >= expected_count:
+            return lesson_json
+        logger.warning(
+            f"enforce_episode_count: expected {expected_count}, got {actual}. "
+            f"Stubbing {expected_count - actual} episode(s)."
+        )
+        for i in range(actual + 1, expected_count + 1):
+            title = (question_titles[i - 1]
+                     if question_titles and len(question_titles) >= i
+                     else f"โจทย์ข้อ {i}")
+            episodes.append({
+                "episode_number": i,
+                "title": title,
+                "core_vocabulary": [],
+                "video_plan": {"estimated_duration_seconds": 60},
+                "script": {"hook": "", "main_body": "", "example_or_trick": "", "call_to_action": ""},
+                "voiceover_script": [],
+                "manim_code_lines": [
+                    "import numpy as np",
+                    "from manim import *",
+                    "config.pixel_width = 1080",
+                    "config.pixel_height = 1920",
+                    "config.frame_height = 16.0",
+                    "config.frame_width = 9.0",
+                    "config.frame_rate = 60",
+                    "class PhysicsScene(Scene):",
+                    "    def construct(self):",
+                    "        self.camera.background_color = '#1C1C2E'",
+                    f"        title = Text('{title}', font='TH Sarabun New', font_size=28, color=WHITE)",
+                    "        title.move_to(ORIGIN)",
+                    "        self.play(FadeIn(title))",
+                    "        self.wait(3)",
+                ]
+            })
+        lesson_json["episodes"] = episodes
+        lesson_json["total_episodes"] = expected_count
+        return lesson_json
 
     def render_episode(self, episode_data: dict) -> dict:
         ep_num = episode_data.get("episode_number", 0)
@@ -230,37 +325,49 @@ class Manim_Engine:
             raw_code = "\n".join(current_data["manim_code_lines"])
             val = preprocess_code(raw_code)
 
-            for fix in val.auto_fixes:
-                logger.info(f"  PRE-FIX: {fix}")
+            if val.auto_fixes:
+                logger.info(f"  Auto-fixes ({len(val.auto_fixes)}):")
+                for fix in val.auto_fixes:
+                    logger.info(f"    • {fix}")
 
             if val.has_violations:
                 logger.warning(
                     f"Ep {ep_num} attempt {attempt}: "
-                    f"{len(val.violations)} rule violations — sending to Gemini."
+                    f"{len(val.violations)} violations after auto-fix:"
                 )
+                for v in val.violations:
+                    logger.warning(f"    [{v.rule}] line {v.line}: {v.snippet[:60]}")
+
                 if attempt > MAX_RETRIES:
                     return {
                         "status": "error",
-                        "message": f"Violations not resolved:\n{val.violation_summary()}",
+                        "message": (
+                            f"Violations not resolved after {MAX_RETRIES} retries:\n"
+                            + val.violation_summary()
+                        ),
                         "attempts": attempt,
                     }
+
                 fixed_lines = self._ask_gemini_to_fix(
                     original_code=val.fixed_code,
                     error_message="Pre-render validation failed — see violations.",
                     violation_summary=val.violation_summary(),
                 )
                 if fixed_lines is None:
-                    return {
-                        "status": "error",
-                        "message": "Gemini fix returned no code (check logs — likely JSON parse error or quota). " + val.violation_summary()[:200],
-                        "attempts": attempt,
-                    }
-                current_data = dict(episode_data)
-                current_data["manim_code_lines"] = fixed_lines
-                continue  # re-validate fixed code
+                    # Gemini unavailable — try rendering with auto-fixed code anyway
+                    # (better than failing immediately on a rate limit)
+                    logger.warning(
+                        f"Ep {ep_num}: Gemini unavailable (rate limit?). "
+                        "Attempting render with auto-fixed code."
+                    )
+                    current_data["manim_code_lines"] = val.fixed_code.splitlines()
+                    # Fall through to render
+                else:
+                    current_data["manim_code_lines"] = fixed_lines
+                    continue  # re-validate
 
-            # Use auto-fixed code (no violations)
-            current_data["manim_code_lines"] = val.fixed_code.splitlines()
+            else:
+                current_data["manim_code_lines"] = val.fixed_code.splitlines()
 
             # ── Step 1: Security check ───────────────────────────────────────
             filepath, code_string = self._write_scene_file(current_data, filename)
@@ -269,21 +376,17 @@ class Manim_Engine:
                 if os.path.exists(filepath):
                     os.remove(filepath)
                 if attempt > MAX_RETRIES:
-                    return {
-                        "status": "error",
-                        "message": f"Security validation failed: {safety_msg}",
-                        "attempts": attempt,
-                    }
+                    return {"status": "error",
+                            "message": f"Security validation failed: {safety_msg}",
+                            "attempts": attempt}
                 fixed_lines = self._ask_gemini_to_fix(
                     original_code=code_string,
                     error_message=f"Security validation failed: {safety_msg}",
                 )
                 if fixed_lines is None:
-                    return {
-                        "status": "error",
-                        "message": "Gemini fix returned no code (check logs — likely JSON parse error or quota). " + safety_msg[:200],
-                        "attempts": attempt,
-                    }
+                    return {"status": "error",
+                            "message": f"Security fail + Gemini unavailable: {safety_msg}",
+                            "attempts": attempt}
                 current_data["manim_code_lines"] = fixed_lines
                 continue
 
@@ -298,7 +401,10 @@ class Manim_Engine:
                     "attempts": attempt,
                 }
 
-            logger.warning(f"Episode {ep_num} attempt {attempt} failed: {render_output[:300]}")
+            logger.warning(
+                f"Episode {ep_num} attempt {attempt} render failed:\n"
+                + render_output[:400]
+            )
             if attempt > MAX_RETRIES:
                 break
 
@@ -307,11 +413,8 @@ class Manim_Engine:
                 error_message=render_output,
             )
             if fixed_lines is None:
-                return {
-                    "status": "error",
-                    "message": "Gemini fix returned no code (check logs — likely JSON parse error or quota). " + render_output[:200],
-                    "attempts": attempt,
-                }
+                logger.warning(f"Ep {ep_num}: Gemini unavailable on render error. Stopping.")
+                break
             current_data["manim_code_lines"] = fixed_lines
 
         return {
@@ -321,7 +424,6 @@ class Manim_Engine:
         }
 
     def render_all_episodes(self, lesson_json: dict) -> list[dict]:
-        """Render every episode in a lesson JSON response and return results list."""
         results = []
         for episode in lesson_json.get("episodes", []):
             result = self.render_episode(episode)
@@ -330,7 +432,6 @@ class Manim_Engine:
         return results
 
     def count_questions_first(self, page_content: str) -> int:
-        """Quick pre-scan to count questions before full generation."""
         try:
             response = self.gemini_client.models.generate_content(
                 model="gemini-2.5-flash",
@@ -347,5 +448,3 @@ class Manim_Engine:
         except Exception as e:
             logger.warning(f"Question count pre-scan failed: {e} — defaulting to 1")
             return 1
-    
-

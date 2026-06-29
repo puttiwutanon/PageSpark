@@ -28,138 +28,109 @@ class PhysicsScene(Scene):
         middle_center = np.array([0, middle_zone_center_y, 0])
         bottom_center = np.array([0, bottom_zone_center_y, 0])
 
-        # Helper function for standing wave visualization (for Ep 2 & 3)
-        def create_fixed_end_standing_wave_mobject(axes, L, n, amplitude=0.5, color=TEAL_C):
-            k = n * np.pi / L
-            wave_path = ParametricFunction(
-                lambda x: axes.coords_to_point(x, amplitude * np.sin(k * x)),
-                t_range=[0, L, 0.01],
-                color=color,
-                stroke_width=4
-            )
-            string_line = Line(axes.coords_to_point(0, 0), axes.coords_to_point(L, 0), color=GRAY_C, stroke_width=2)
-            
-            wall_height = amplitude * 1.5
-            left_wall = Line(axes.coords_to_point(0, -wall_height), axes.coords_to_point(0, wall_height), color=GRAY_D, stroke_width=3)
-            right_wall = Line(axes.coords_to_point(L, -wall_height), axes.coords_to_point(L, wall_height), color=GRAY_D, stroke_width=3)
-            
-            nodes = VGroup()
-            for i in range(n + 1):
-                node_x = i * (L / n)
-                nodes.add(Dot(axes.coords_to_point(node_x, 0), color=BLUE_D, radius=0.08))
-            
-            return VGroup(string_line, wave_path, left_wall, right_wall, nodes)
+        # Problem 60 variables
+        L_val = 1.20 # m
+        f_val = 320 # Hz
+        n_val = 3 # From diagram (3 loops) or "ขั้นโอเวอร์โทนที่ 2" (n=3)
+        lambda_val = 2 * L_val / n_val # 0.8 m
+        v_val = f_val * lambda_val # 256 m/s
 
-        # --- Episode 1: Problem 58 ---
-        # Python calculations
-        f_val_ep1 = 500
-        v_val_ep1 = 400
-        lambda_val_ep1 = v_val_ep1 / f_val_ep1
-        distance_nodes_ep1 = lambda_val_ep1 / 2
-
-        # Problem Text
-        title_ep1 = Text('ระยะห่างระหว่างบัพของคลื่นนิ่ง', font='TH Sarabun New', font_size=28, color=WHITE)
-        problem_text_ep1 = VGroup(
-            Text('ในการทดลองคลื่นนิ่งบนเส้นเชือก ถ้าความถี่ของคลื่นนิ่งเป็น 500 เฮิรตซ์', font='TH Sarabun New', font_size=28, color=WHITE),
-            Text('และอัตราเร็วของคลื่นในเส้นเชือกเท่ากับ 400 เมตรต่อวินาที', font='TH Sarabun New', font_size=28, color=WHITE),
-            Text('ตำแหน่งบัพสองตำแหน่งที่อยู่ถัดกันจะห่างกันเท่าไร', font='TH Sarabun New', font_size=28, color=WHITE),
+        # Top Zone: Problem Statement
+        problem_text = VGroup(
+            Text('60. เส้นลวดยาว 1.20 เมตร ปลายทั้งสองถูกขึงตึง เมื่อลวดสั่นด้วยความถี่ 320 เฮิรตซ์', font='TH Sarabun New', font_size=28, color=GRAY_A),
+            Text('จะเกิดการสั่นพ้องในขั้นโอเวอร์โทนที่ 2 จงหาอัตราเร็วของคลื่นในลวดเส้นนี้', font='TH Sarabun New', font_size=28, color=GRAY_A),
         ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
-        
-        title_group_ep1 = VGroup(title_ep1, problem_text_ep1).arrange(DOWN, buff=0.2)
-        if title_group_ep1.width > frame_width * 0.88:
-            title_group_ep1.scale_to_fit_width(frame_width * 0.88)
-        if title_group_ep1.height > top_zone_height * 0.88:
-            title_group_ep1.scale_to_fit_height(top_zone_height * 0.88)
-        title_group_ep1.move_to(top_center)
+        if problem_text.width > frame_width * 0.88:
+            problem_text.scale_to_fit_width(frame_width * 0.88)
+        if problem_text.height > top_zone_height * 0.88:
+            problem_text.scale_to_fit_height(top_zone_height * 0.88)
+        problem_text.move_to(top_center)
+        self.play(FadeIn(problem_text, shift=UP*0.15))
+        self.wait(1.5)
 
-        # Visualization for Episode 1
-        amplitude_ep1 = 0.5
-        x_max_plot_ep1 = lambda_val_ep1 * 2.5
-        y_max_plot_ep1 = amplitude_ep1 * 1.5
-        x_step_plot_ep1 = lambda_val_ep1 / 2
-        y_step_plot_ep1 = amplitude_ep1 / 2
+        # Middle Zone: Visualization - Standing Wave (n=3)
+        string_line = Line(start=LEFT*3, end=RIGHT*3, color=WHITE, stroke_width=2)
+        left_wall = Line(start=string_line.get_left() + UP*0.5, end=string_line.get_left() + DOWN*0.5, color=GRAY_A, stroke_width=3)
+        right_wall = Line(start=string_line.get_right() + UP*0.5, end=string_line.get_right() + DOWN*0.5, color=GRAY_A, stroke_width=3)
 
-        axes_ep1 = Axes(
-            x_range=[0, x_max_plot_ep1, x_step_plot_ep1],
-            y_range=[-y_max_plot_ep1, y_max_plot_ep1, y_step_plot_ep1],
-            x_length=frame_width * 0.60,
-            y_length=middle_zone_height * 0.65,
-            axis_config={
-                'color': GRAY_C,
-                'stroke_width': 2,
-                'include_tip': True,
-                'tip_length': 0.15,
-                'tip_width': 0.10,
-            },
-            x_axis_config={'include_numbers': True, 'font_size': 16, 'color': GRAY_B, 'numbers_to_exclude': [0]},
-            y_axis_config={'include_numbers': True, 'font_size': 16, 'color': GRAY_B, 'numbers_to_exclude': [0]},
+        standing_wave_upper = FunctionGraph(
+            lambda x: 0.8 * np.sin(3 * np.pi * (x + 3) / 6), # 3 loops over length 6
+            x_range=[-3, 3],
+            color=BLUE_C
         )
-        x_label_ep1 = axes_ep1.get_x_axis_label(
-            Text('ตำแหน่ง (m)', font='TH Sarabun New', font_size=18, color=GRAY_A),
-            edge=DOWN, direction=DOWN, buff=0.35
+        standing_wave_lower = FunctionGraph(
+            lambda x: -0.8 * np.sin(3 * np.pi * (x + 3) / 6),
+            x_range=[-3, 3],
+            color=BLUE_C
         )
-        y_label_ep1 = axes_ep1.get_y_axis_label(
-            Text('การกระจัด', font='TH Sarabun New', font_size=18, color=GRAY_A).rotate(90 * DEGREES),
-            edge=LEFT, direction=LEFT, buff=0.30
+        
+        brace_L = BraceBetweenPoints(string_line.get_left(), string_line.get_right(), direction=DOWN)
+        L_label = VGroup(
+            MathTex(r'L = ', font_size=26, color=GOLD_B),
+            MathTex(f'{L_val}\\\,\\\mathrm{{m}}', font_size=26, color=GOLD_B)
+        ).arrange(RIGHT, buff=0.1).next_to(brace_L, DOWN, buff=0.1)
+
+        vis_group = VGroup(
+            string_line, left_wall, right_wall,
+            standing_wave_upper, standing_wave_lower,
+            brace_L, L_label
         )
-        axes_labels_ep1 = VGroup(x_label_ep1, y_label_ep1)
-
-        k_ep1 = 2 * np.pi / lambda_val_ep1
-        wave_path_ep1 = ParametricFunction(
-            lambda x: axes_ep1.coords_to_point(x, amplitude_ep1 * np.sin(k_ep1 * x)),
-            t_range=[0, x_max_plot_ep1, 0.01],
-            color=TEAL_C,
-            stroke_width=4
-        )
-
-        node_dot1_ep1 = Dot(axes_ep1.coords_to_point(0, 0), color=BLUE_D, radius=0.08)
-        node_dot2_ep1 = Dot(axes_ep1.coords_to_point(lambda_val_ep1 / 2, 0), color=BLUE_D, radius=0.08)
-        node_dot3_ep1 = Dot(axes_ep1.coords_to_point(lambda_val_ep1, 0), color=BLUE_D, radius=0.08)
         
-        brace_ep1 = BraceBetweenPoints(node_dot1_ep1.get_center(), node_dot2_ep1.get_center(), direction=DOWN)
-        # Fixed Rule 9: font_size for MathTex (brace_label_ep1) changed from 20 to 26
-        brace_label_ep1 = MathTex(r'\frac{\lambda}{2}', font_size=26, color=WHITE).next_to(brace_ep1, DOWN, buff=0.1)
-        distance_label_ep1 = Text(f'{distance_nodes_ep1:.1f} m', font='TH Sarabun New', font_size=18, color=WHITE).next_to(brace_label_ep1, DOWN, buff=0.1)
+        vis_group.scale_to_fit_width(frame_width * 0.88)
+        vis_group.scale_to_fit_height(middle_zone_height * 0.82)
+        if vis_group.width < frame_width * 0.55:
+            vis_group.scale_to_fit_width(frame_width * 0.55)
+        if vis_group.height < middle_zone_height * 0.55:
+            vis_group.scale_to_fit_height(middle_zone_height * 0.55)
+        vis_group.move_to(middle_center)
 
-        wave_group_ep1 = VGroup(axes_ep1, axes_labels_ep1, wave_path_ep1, node_dot1_ep1, node_dot2_ep1, node_dot3_ep1, brace_ep1, brace_label_ep1, distance_label_ep1)
-        wave_group_ep1.scale_to_fit_width(frame_width * 0.88)
-        wave_group_ep1.scale_to_fit_height(middle_zone_height * 0.82)
-        if wave_group_ep1.height < middle_zone_height * 0.55:
-            wave_group_ep1.scale(middle_zone_height * 0.55 / wave_group_ep1.height)
-        if wave_group_ep1.width < frame_width * 0.55:
-            wave_group_ep1.scale(frame_width * 0.55 / wave_group_ep1.width)
-        wave_group_ep1.move_to(middle_center)
-        
-        # Equations for Episode 1
-        # Fixed Rule 1: [LATEX_IN_TEXT] on original line 135
-        step1_title_ep1_part1 = Text('ขั้นตอนที่ 1:', font='TH Sarabun New', font_size=26, color=GOLD_B)
-        step1_title_ep1_part2_text = Text('หาความยาวคลื่น', font='TH Sarabun New', font_size=26, color=GOLD_B)
-        step1_title_ep1_part2_lambda = MathTex(r'(\lambda)', font_size=26, color=GOLD_B)
-        step1_title_ep1_part2_group = VGroup(step1_title_ep1_part2_text, step1_title_ep1_part2_lambda).arrange(RIGHT, buff=0.05)
-        step1_title_ep1 = VGroup(step1_title_ep1_part1, step1_title_ep1_part2_group).arrange(RIGHT, buff=0.15)
-
-        eq1_vfl_ep1 = MathTex(r'v = f\lambda', font_size=26, color=BLUE_C)
-        eq1_sub_ep1 = MathTex(r'400 \mathrm{ m/s} = (500 \mathrm{ Hz}) \lambda', font_size=26, color=WHITE)
-        eq1_ans_ep1 = MathTex(r'\lambda = \frac{400}{500} = 0.8 \mathrm{ m}', font_size=26, color=WHITE)
-        
-        step2_title_ep1 = VGroup(
-            Text('ขั้นตอนที่ 2:', font='TH Sarabun New', font_size=26, color=GOLD_B),
-            Text('หาระยะห่างระหว่างบัพ', font='TH Sarabun New', font_size=26, color=GOLD_B),
-        ).arrange(RIGHT, buff=0.15)
-        eq2_d_ep1 = MathTex(r'd = \frac{\lambda}{2}', font_size=26, color=BLUE_C)
-        eq2_sub_ep1 = MathTex(r'd = \frac{0.8 \mathrm{ m}}{2}', font_size=26, color=WHITE)
-        eq2_ans_ep1 = MathTex(r'd = 0.4 \mathrm{ m}', font_size=26, color=WHITE)
-
-        step_group1_ep1 = VGroup(step1_title_ep1, eq1_vfl_ep1, eq1_sub_ep1, eq1_ans_ep1).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
-        step_group1_ep1.scale_to_fit_width(frame_width * 0.88)
-        step_group1_ep1.scale_to_fit_height(bottom_zone_height * 0.88)
-        # Fixed Rule 11: Missing move_to for step_group1_ep1
-        step_group1_ep1.move_to(bottom_center)
-
-        # Added minimal animations to make the scene runnable (Rule 17)
-        self.play(Create(title_group_ep1))
-        self.wait(1)
-        self.play(Create(wave_group_ep1))
-        self.wait(1)
-        self.play(Create(step_group1_ep1))
+        self.play(Create(string_line), Create(left_wall), Create(right_wall))
+        self.play(Create(standing_wave_upper), Create(standing_wave_lower))
+        self.play(GrowFromCenter(brace_L), Write(L_label))
         self.wait(2)
+
+        # Bottom Zone: Calculations
+        step1_title = Text('ขั้นตอนที่ 1: หาความยาวคลื่น (λ)', font='TH Sarabun New', font_size=26, color=BLUE_D)
+        eq1_text = Text('จากรูปคลื่นนิ่ง 3 ลูป (n=3) หรือ โอเวอร์โทนที่ 2:', font='TH Sarabun New', font_size=26, color=WHITE)
+        eq1 = MathTex(r'L = n\\frac{\\lambda}{2}', font_size=26, color=WHITE)
+        eq1_sub = MathTex(r'1.20 = 3 \\times \\frac{\\lambda}{2}', font_size=26, color=WHITE)
+        eq1_res = MathTex(r'\\lambda = \\frac{2 \\times 1.20}{3} = 0.8\\,\\mathrm{m}', font_size=26, color=GREEN_C)
+
+        step_group1 = VGroup(step1_title, eq1_text, eq1, eq1_sub, eq1_res).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
+        step_group1.scale_to_fit_width(frame_width * 0.88)
+        step_group1.scale_to_fit_height(bottom_zone_height * 0.88)
+        step_group1.move_to(bottom_center)
+
+        self.play(FadeIn(step1_title, shift=UP*0.15))
+        self.play(Write(eq1_text))
+        self.play(Write(eq1))
+        self.wait(1.5)
+        self.play(TransformMatchingTex(eq1, eq1_sub))
+        self.wait(1.5)
+        self.play(TransformMatchingTex(eq1_sub, eq1_res))
+        self.wait(2.5)
+
+        step2_title = Text('ขั้นตอนที่ 2: หาอัตราเร็วคลื่น (v)', font='TH Sarabun New', font_size=26, color=BLUE_D)
+        eq2 = MathTex(r'v = f\\lambda', font_size=26, color=WHITE)
+        eq2_sub = MathTex(r'v = 320 \\times 0.8', font_size=26, color=WHITE)
+        
+        final_result_text = Text('อัตราเร็ว v = ', font='TH Sarabun New', font_size=26, color=GREEN_C)
+        final_result_math = MathTex(r'256\\,\\mathrm{m/s}', font_size=26, color=GREEN_C)
+        eq2_res_group = VGroup(final_result_text, final_result_math).arrange(RIGHT, buff=0.1)
+
+        step_group2 = VGroup(step2_title, eq2, eq2_sub, eq2_res_group).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
+        step_group2.scale_to_fit_width(frame_width * 0.88)
+        step_group2.scale_to_fit_height(bottom_zone_height * 0.88)
+        step_group2.move_to(bottom_center)
+
+        self.play(FadeOut(step_group1, shift=DOWN*0.1), FadeIn(step_group2, shift=UP*0.1))
+        self.wait(1.5)
+        self.play(Write(eq2))
+        self.wait(1.5)
+        self.play(TransformMatchingTex(eq2, eq2_sub))
+        self.wait(1.5)
+        self.play(FadeOut(eq2_sub, shift=DOWN*0.1), FadeIn(eq2_res_group, shift=UP*0.1))
+        self.wait(2.5)
+
+        self.play(FadeOut(problem_text, shift=DOWN*0.1), FadeOut(step_group2, shift=DOWN*0.1))
+        self.wait(1)
