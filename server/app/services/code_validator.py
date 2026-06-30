@@ -455,6 +455,53 @@ def _fix_move_to_scalar(code: str, fixes: list[str]) -> str:
     return code
 
 
+def _fix_axes_too_large(code: str, fixes: list[str]) -> str:
+    """
+    Clamp x_length/y_length on Axes(...) calls to the safe ceiling
+    (5.85 / 4.68) instead of escalating to a Gemini fix-call.
+    This mirrors the threshold used by _detect_axes_too_large.
+    """
+    def x_replacer(m):
+        val = float(m.group(1))
+        if val > 5.85:
+            fixes.append(f"AUTO-FIX: x_length={val} > 5.85 → clamped to 5.85")
+            return "x_length=5.85"
+        return m.group(0)
+
+    def y_replacer(m):
+        val = float(m.group(1))
+        if val > 4.68:
+            fixes.append(f"AUTO-FIX: y_length={val} > 4.68 → clamped to 4.68")
+            return "y_length=4.68"
+        return m.group(0)
+
+    code = re.sub(r'x_length\s*=\s*([0-9.]+)', x_replacer, code)
+    code = re.sub(r'y_length\s*=\s*([0-9.]+)', y_replacer, code)
+    return code
+
+
+def _fix_font_size_too_large(code: str, fixes: list[str]) -> str:
+    """
+    Clamp font_size on Text()/MathTex() calls to 28 instead of
+    escalating to a Gemini fix-call. Only touches font_size args
+    that appear on the same line as Text(/MathTex( to avoid
+    accidentally clamping unrelated font_size usages (e.g. axis labels
+    which already have their own smaller defaults set by Gemini).
+    """
+    pattern = re.compile(
+        r'((?:Text|MathTex)\s*\([^)]*?font_size\s*=\s*)([0-9]+)'
+    )
+
+    def replacer(m):
+        size = int(m.group(2))
+        if size > 28:
+            fixes.append(f"AUTO-FIX: font_size={size} > 28 → clamped to 28")
+            return f"{m.group(1)}28"
+        return m.group(0)
+
+    return pattern.sub(replacer, code)
+
+
 def _fix_missing_numpy_import(code: str, fixes: list[str]) -> str:
     """Add import numpy as np if missing from first 5 lines."""
     lines = code.splitlines()
@@ -927,6 +974,8 @@ def preprocess_code(code_string: str) -> ValidationResult:
     code = _fix_bottom_zone_bottom(code, auto_fixes)
     code = _fix_move_to_scalar(code, auto_fixes)
     code = _fix_include_numbers_in_axis_config(code, auto_fixes)
+    code = _fix_axes_too_large(code, auto_fixes)        # ← NEW: clamp instead of escalate
+    code = _fix_font_size_too_large(code, auto_fixes)   # ← NEW: clamp instead of escalate
     
     # 3. String content fixes (order: most specific first)
     code = _fix_vgroup_list_comprehension(code, auto_fixes)  # ← KEY NEW FIX

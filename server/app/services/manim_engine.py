@@ -10,6 +10,7 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 from app.services.code_validator import preprocess_code
+from app.storage.video_storage import upload_episode_video
 from pydantic import BaseModel
 
 load_dotenv()
@@ -128,6 +129,44 @@ FIX_PROMPT_TEMPLATE = """
 """
 
 
+LINE_FIX_PROMPT_TEMPLATE = """
+คุณเป็น Manim developer ที่แก้บั๊กแบบ surgical — แก้เฉพาะบรรทัดที่ระบุเท่านั้น
+
+ด้านล่างคือ "violations" ที่พบ พร้อมหมายเลขบรรทัดและบริบทรอบๆ (3 บรรทัดก่อน/หลัง)
+แต่ละ violation มี context_id กำกับไว้ — ใช้ context_id นั้นตอบกลับ
+
+{violation_blocks}
+
+══ กฎเหล็ก — ดูตัวอย่างก่อน/หลังแล้วแก้ตามนี้เสมอ ══
+
+❌ WRONG — VGroup(*[...]) list comprehension:
+    VGroup(*[Text(line, font='TH Sarabun New', font_size=26) for line in lines])
+✅ CORRECT:
+    VGroup(
+        Text('A', font='TH Sarabun New', font_size=26, color=GRAY_A),
+        Text('B', font='TH Sarabun New', font_size=26, color=GRAY_A),
+    ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
+
+❌ WRONG — LaTeX ใน Text(): Text('หาความยาวคลื่น (\\lambda)', ...)
+✅ CORRECT — ใช้ unicode: Text('หาความยาวคลื่น (λ)', ...)
+
+❌ WRONG — Thai ใน MathTex(): MathTex(r'\\mathrm{{วินาที}}', ...)
+✅ CORRECT — แยก Thai ออกเป็น Text() แล้วรวมด้วย VGroup
+
+❌ WRONG — .move_to(scalar): group.move_to(bottom_zone_center_y)
+✅ CORRECT: group.move_to(np.array([0, bottom_zone_center_y, 0]))
+
+❌ WRONG — .arrange(RIGHT) กับ Text ไทยยาว (15+ ตัวอักษร)
+✅ CORRECT — .arrange(DOWN, aligned_edge=LEFT)
+
+สำหรับแต่ละ context_id ด้านบน ส่งคืนเฉพาะบรรทัดที่แก้ไขแล้ว (อาจมีจำนวนบรรทัด
+มากกว่าหรือน้อยกว่าเดิมได้ถ้าจำเป็น เช่นแยก 1 บรรทัดเป็นหลายบรรทัด) เป็น list ของ string
+
+ส่งคืนเฉพาะ JSON เท่านั้น ห้ามมีข้อความอื่น ห้ามใส่หมายเลขบรรทัดในสตริง:
+{{"fixes": {{"<context_id>": ["บรรทัดที่แก้ 1", "บรรทัดที่แก้ 2"]}}}}
+"""
+
+
 COUNT_PROMPT = """
     อ่านเนื้อหาที่ผู้ใช้ส่งมาและนับจำนวนโจทย์ฟิสิกส์ที่แยกจากกันได้ทั้งหมด
     (แต่ละโจทย์ที่มีสถานการณ์หรือตัวเลขต่างกัน นับเป็น 1 โจทย์)
@@ -177,6 +216,16 @@ class Manim_Engine:
         with open(filepath, "w", encoding="utf-8") as fh:
             fh.write(code)
         return filepath, code
+
+    def _resolve_rendered_mp4_path(self, scene_filepath: str) -> str:
+        """
+        manim -ql writes to:
+          {media_dir}/videos/{scene_file_stem}/480p15/{SceneClassName}.mp4
+        `-ql` = "quality low" = 480p15. If you ever change the manim quality
+        flag in _run_manim, update "480p15" here to match.
+        """
+        stem = os.path.splitext(os.path.basename(scene_filepath))[0]
+        return os.path.join(self.output_dir, "videos", stem, "480p15", "PhysicsScene.mp4")
 
     def _run_manim(self, filepath: str) -> tuple[bool, str]:
         cmd = ["manim", "-ql", filepath, "PhysicsScene", "--media_dir", self.output_dir]
@@ -266,6 +315,127 @@ class Manim_Engine:
         logger.error("Gemini: exhausted all backoff retries.")
         return None
 
+    def _ask_gemini_to_fix_lines(
+        self,
+        code: str,
+        violations: list,
+        context_radius: int = 3,
+    ) -> str | None:
+        """
+        Targeted fix: send Gemini ONLY the violating lines (plus a few lines
+        of context each) instead of the whole file, and splice the returned
+        replacement lines back into `code` locally.
+
+        Used for validator violations (which already carry an exact line
+        number per code_validator.Violation) — NOT for raw render/stderr
+        errors, where the root cause is often several lines away from where
+        the traceback points and full-file context is genuinely needed.
+
+        Returns the full patched code string, or None if Gemini fix failed
+        (caller should fall back to the full-file _ask_gemini_to_fix or
+        render with auto-fixed code as-is).
+        """
+        lines = code.splitlines()
+
+        # Build one context block per violation, each tagged with a stable
+        # context_id so we know exactly which lines to replace after Gemini
+        # responds — no fuzzy matching needed.
+        blocks = []
+        replace_ranges: dict[str, tuple[int, int]] = {}  # context_id -> (start_idx, end_idx) inclusive, 0-based
+
+        for i, v in enumerate(violations):
+            ctx_id = f"v{i}_{v.rule}"
+            line_idx = v.line - 1  # Violation.line is 1-based
+            start = max(0, line_idx - context_radius)
+            end = min(len(lines) - 1, line_idx + context_radius)
+
+            numbered = "\n".join(
+                f"{n + 1}: {lines[n]}" for n in range(start, end + 1)
+            )
+            blocks.append(
+                f"--- context_id: {ctx_id} ---\n"
+                f"[{v.rule}] {v.description}\n"
+                f"บรรทัดที่ต้องแก้คือบรรทัด {v.line} (อยู่ในช่วงด้านล่าง):\n"
+                f"{numbered}\n"
+            )
+            replace_ranges[ctx_id] = (start, end)
+
+        prompt = LINE_FIX_PROMPT_TEMPLATE.format(
+            violation_blocks="\n".join(blocks)
+        )
+
+        for backoff in range(3):
+            try:
+                response = self.gemini_client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        response_mime_type="application/json",
+                    ),
+                )
+                raw = response.text.strip()
+                raw = re.sub(r"^```(?:json|python)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+                raw = smart_json_sanitize(raw)
+
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Gemini line-fix JSON parse failed: {e}")
+                    logger.error(f"Sanitized raw (first 300): {raw[:300]}")
+                    return None
+
+                fixes = parsed.get("fixes")
+                if not isinstance(fixes, dict) or not fixes:
+                    logger.warning("Gemini line-fix response had no usable 'fixes' field.")
+                    return None
+
+                # Splice replacements back in, working from the BOTTOM up so
+                # earlier replace_ranges indices stay valid as line counts shift.
+                ordered = sorted(
+                    replace_ranges.items(),
+                    key=lambda kv: kv[1][0],
+                    reverse=True,
+                )
+                patched_lines = list(lines)
+                applied = 0
+                for ctx_id, (start, end) in ordered:
+                    replacement = fixes.get(ctx_id)
+                    if not isinstance(replacement, list) or not replacement:
+                        logger.warning(f"No fix returned for {ctx_id} — leaving original lines.")
+                        continue
+                    patched_lines[start:end + 1] = replacement
+                    applied += 1
+
+                if applied == 0:
+                    logger.warning("Gemini line-fix returned no applicable fixes.")
+                    return None
+
+                logger.info(f"Line-fix: applied {applied}/{len(violations)} targeted patches.")
+                return "\n".join(patched_lines)
+
+            except Exception as exc:
+                err_str = str(exc)
+                if any(x in err_str for x in [
+                    "429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "quota", "overloaded",
+                ]):
+                    wait = 2 ** (backoff + 1)
+                    logger.warning(
+                        f"Gemini transient error ({err_str[:60]}). "
+                        f"Waiting {wait}s (backoff {backoff + 1}/3)..."
+                    )
+                    time.sleep(wait)
+                    continue
+                if any(x in err_str for x in ["403", "PERMISSION_DENIED", "denied"]):
+                    logger.error(f"Gemini API quota exhausted (403): {exc}")
+                    return None
+                logger.error(f"Gemini line-fix failed (non-retryable): {exc}")
+                return None
+
+        logger.error("Gemini line-fix: exhausted all backoff retries.")
+        return None
+
     def enforce_episode_count(
         self,
         lesson_json: dict,
@@ -312,7 +482,7 @@ class Manim_Engine:
         lesson_json["total_episodes"] = expected_count
         return lesson_json
 
-    def render_episode(self, episode_data: dict) -> dict:
+    def render_episode(self, episode_data: dict, *, uid: str | None = None, lesson_id: str | None = None) -> dict:
         ep_num = episode_data.get("episode_number", 0)
         filename = f"scene_ep_{ep_num}.py"
         current_data = dict(episode_data)
@@ -348,6 +518,20 @@ class Manim_Engine:
                         "attempts": attempt,
                     }
 
+                fixed_code = self._ask_gemini_to_fix_lines(
+                    code=val.fixed_code,
+                    violations=val.violations,
+                )
+                if fixed_code is not None:
+                    current_data["manim_code_lines"] = fixed_code.splitlines()
+                    continue  # re-validate
+
+                # Targeted line-fix failed/unavailable — fall back to the
+                # full-file fixer once before giving up on this attempt.
+                logger.warning(
+                    f"Ep {ep_num}: targeted line-fix failed, "
+                    "falling back to full-file fix."
+                )
                 fixed_lines = self._ask_gemini_to_fix(
                     original_code=val.fixed_code,
                     error_message="Pre-render validation failed — see violations.",
@@ -394,9 +578,34 @@ class Manim_Engine:
             success, render_output = self._run_manim(filepath)
             if success:
                 logger.info(f"Episode {ep_num} rendered OK on attempt {attempt}.")
+                mp4_path = self._resolve_rendered_mp4_path(filepath)
+
+                upload_doc = None
+                if uid and os.path.exists(mp4_path):
+                    upload_doc = upload_episode_video(
+                        mp4_path,
+                        uid=uid,
+                        episode_number=ep_num,
+                        lesson_id=lesson_id,
+                        question_title=episode_data.get("question_title"),
+                    )
+                    if upload_doc is None:
+                        logger.warning(
+                            f"Episode {ep_num}: render succeeded but Firestore/"
+                            "Storage upload was skipped or failed (non-fatal — "
+                            "video still exists locally at %s)", mp4_path,
+                        )
+                elif uid and not os.path.exists(mp4_path):
+                    logger.warning(
+                        f"Episode {ep_num}: render reported success but expected "
+                        f"mp4 not found at {mp4_path} — skipping upload."
+                    )
+
                 return {
                     "status": "success",
                     "filepath": filepath,
+                    "video_path": mp4_path,
+                    "video_url": upload_doc["video_url"] if upload_doc else None,
                     "output": render_output,
                     "attempts": attempt,
                 }
@@ -423,10 +632,10 @@ class Manim_Engine:
             "attempts": min(attempt, MAX_RETRIES + 1),
         }
 
-    def render_all_episodes(self, lesson_json: dict) -> list[dict]:
+    def render_all_episodes(self, lesson_json: dict, *, uid: str | None = None, lesson_id: str | None = None) -> list[dict]:
         results = []
         for episode in lesson_json.get("episodes", []):
-            result = self.render_episode(episode)
+            result = self.render_episode(episode, uid=uid, lesson_id=lesson_id)
             result["episode_number"] = episode.get("episode_number")
             results.append(result)
         return results

@@ -28,17 +28,19 @@ class PhysicsScene(Scene):
         middle_center = np.array([0, middle_zone_center_y, 0])
         bottom_center = np.array([0, bottom_zone_center_y, 0])
 
-        # Problem 60 variables
-        L_val = 1.20 # m
-        f_val = 320 # Hz
-        n_val = 3 # From diagram (3 loops) or "ขั้นโอเวอร์โทนที่ 2" (n=3)
-        lambda_val = 2 * L_val / n_val # 0.8 m
-        v_val = f_val * lambda_val # 256 m/s
+        # Problem 22 Data
+        f1 = 120 # Hz
+        f2 = 122 # Hz
+        t_time = 1.2 # s
 
-        # Top Zone: Problem Statement
+        # Calculations
+        delta_f = f2 - f1 # 2 Hz
+        delta_phi = 2 * PI * delta_f * t_time # 2 * PI * 2 * 1.2 = 4.8 * PI radians
+
+        # --- Top Zone: Problem Statement ---
         problem_text = VGroup(
-            Text('60. เส้นลวดยาว 1.20 เมตร ปลายทั้งสองถูกขึงตึง เมื่อลวดสั่นด้วยความถี่ 320 เฮิรตซ์', font='TH Sarabun New', font_size=28, color=GRAY_A),
-            Text('จะเกิดการสั่นพ้องในขั้นโอเวอร์โทนที่ 2 จงหาอัตราเร็วของคลื่นในลวดเส้นนี้', font='TH Sarabun New', font_size=28, color=GRAY_A),
+            Text('22. คลื่นต่อเนื่องสองขบวน มีความถี่ 120 Hz และ 122 Hz เริ่มเคลื่อนที่ออกจากจุดเดียวกัน', font='TH Sarabun New', font_size=28, color=GRAY_A),
+            Text('ด้วยเฟสตรงกัน เมื่อเวลา 1.2 วินาที คลื่นทั้งสองจะมีเฟสต่างกันเท่าไร', font='TH Sarabun New', font_size=28, color=GRAY_A),
         ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
         if problem_text.width > frame_width * 0.88:
             problem_text.scale_to_fit_width(frame_width * 0.88)
@@ -46,91 +48,139 @@ class PhysicsScene(Scene):
             problem_text.scale_to_fit_height(top_zone_height * 0.88)
         problem_text.move_to(top_center)
         self.play(FadeIn(problem_text, shift=UP*0.15))
-        self.wait(1.5)
+        self.wait(11.0) # Hook duration
 
-        # Middle Zone: Visualization - Standing Wave (n=3)
-        string_line = Line(start=LEFT*3, end=RIGHT*3, color=WHITE, stroke_width=2)
-        left_wall = Line(start=string_line.get_left() + UP*0.5, end=string_line.get_left() + DOWN*0.5, color=GRAY_A, stroke_width=3)
-        right_wall = Line(start=string_line.get_right() + UP*0.5, end=string_line.get_right() + DOWN*0.5, color=GRAY_A, stroke_width=3)
+        # --- Middle Zone: Two Waves Visualization ---
+        # Axes for displacement vs time
+        t_max_display = 1.2 # Display up to the given time
+        y_amplitude = 0.5
+        axes_time_two_waves = Axes(
+            x_range=[0, t_max_display, 0.2],
+            y_range=[-y_amplitude, y_amplitude, y_amplitude],
+            x_length=frame_width * 0.60,
+            y_length=middle_zone_height * 0.65,
+            axis_config={
+                'color': GRAY_C,
+                'stroke_width': 2,
+                'include_tip': True,
+                'tip_length': 0.15,
+                'tip_width': 0.10,
+            },
+            x_axis_config={'include_numbers': True, 'font_size': 16, 'color': GRAY_B},
+            y_axis_config={'include_numbers': True, 'font_size': 16, 'color': GRAY_B},
+        )
+        x_label_time_two_waves = axes_time_two_waves.get_x_axis_label(
+            Text('เวลา (s)', font='TH Sarabun New', font_size=18, color=GRAY_A),
+            edge=DOWN, direction=DOWN, buff=0.35
+        )
+        y_label_time_two_waves = axes_time_two_waves.get_y_axis_label(
+            Text('การกระจัด', font='TH Sarabun New', font_size=18, color=GRAY_A).rotate(90 * DEGREES),
+            edge=LEFT, direction=LEFT, buff=0.30
+        )
 
-        standing_wave_upper = FunctionGraph(
-            lambda x: 0.8 * np.sin(3 * np.pi * (x + 3) / 6), # 3 loops over length 6
-            x_range=[-3, 3],
-            color=BLUE_C
-        )
-        standing_wave_lower = FunctionGraph(
-            lambda x: -0.8 * np.sin(3 * np.pi * (x + 3) / 6),
-            x_range=[-3, 3],
-            color=BLUE_C
-        )
+        def wave_func1(t):
+            return y_amplitude * np.sin(2 * PI * f1 * t)
+
+        def wave_func2(t):
+            return y_amplitude * np.sin(2 * PI * f2 * t)
+
+        wave_graph1 = axes_time_two_waves.plot(wave_func1, x_range=[0, t_max_display, 0.001], color=BLUE_C)
+        wave_graph2 = axes_time_two_waves.plot(wave_func2, x_range=[0, t_max_display, 0.001], color=ORANGE)
+
+        label_f1 = VGroup(
+            Text('f', font='TH Sarabun New', font_size=18, color=BLUE_C),
+            MathTex(r'_1', font_size=18, color=BLUE_C),
+            Text('= 120 Hz', font='TH Sarabun New', font_size=18, color=BLUE_C)
+        ).arrange(RIGHT, buff=0.05).next_to(axes_time_two_waves.coords_to_point(t_max_display*0.2, y_amplitude*0.8), UP, buff=0.1)
+
+        label_f2 = VGroup(
+            Text('f', font='TH Sarabun New', font_size=18, color=ORANGE),
+            MathTex(r'_2', font_size=18, color=ORANGE),
+            Text('= 122 Hz', font='TH Sarabun New', font_size=18, color=ORANGE)
+        ).arrange(RIGHT, buff=0.05).next_to(axes_time_two_waves.coords_to_point(t_max_display*0.8, y_amplitude*0.8), UP, buff=0.1)
+
+        axes_group = VGroup(axes_time_two_waves, x_label_time_two_waves, y_label_time_two_waves)
+        axes_group.scale_to_fit_width(frame_width * 0.88)
+        axes_group.scale_to_fit_height(middle_zone_height * 0.82)
+        if axes_group.width < frame_width * 0.55:
+            axes_group.scale_to_fit_width(frame_width * 0.55)
+        if axes_group.height < middle_zone_height * 0.55:
+            axes_group.scale_to_fit_height(middle_zone_height * 0.55)
+        axes_group.move_to(middle_center)
+
+        self.play(Create(axes_time_two_waves), Write(x_label_time_two_waves), Write(y_label_time_two_waves))
+        self.wait(0.8)
+        self.play(Create(wave_graph1), Write(label_f1))
+        self.play(Create(wave_graph2), Write(label_f2))
+        self.wait(0.8)
+
+        # Animate the waves over time to show phase difference building up
+        line_at_t = axes_time_two_waves.get_vertical_line(axes_time_two_waves.coords_to_point(t_time, 0), color=GRAY_A, stroke_width=2, stroke_dash_offset=0.1)
+        dot_f1 = Dot(axes_time_two_waves.coords_to_point(t_time, wave_func1(t_time)), color=BLUE_C, radius=0.08)
+        dot_f2 = Dot(axes_time_two_waves.coords_to_point(t_time, wave_func2(t_time)), color=ORANGE, radius=0.08)
         
-        brace_L = BraceBetweenPoints(string_line.get_left(), string_line.get_right(), direction=DOWN)
-        L_label = VGroup(
-            MathTex(r'L = ', font_size=26, color=GOLD_B),
-            MathTex(f'{L_val}\\\,\\\mathrm{{m}}', font_size=26, color=GOLD_B)
-        ).arrange(RIGHT, buff=0.1).next_to(brace_L, DOWN, buff=0.1)
+        self.play(Create(line_at_t), GrowFromCenter(dot_f1), GrowFromCenter(dot_f2))
+        self.wait(11.0) # Hook duration, but also for visualization.
 
-        vis_group = VGroup(
-            string_line, left_wall, right_wall,
-            standing_wave_upper, standing_wave_lower,
-            brace_L, L_label
-        )
-        
-        vis_group.scale_to_fit_width(frame_width * 0.88)
-        vis_group.scale_to_fit_height(middle_zone_height * 0.82)
-        if vis_group.width < frame_width * 0.55:
-            vis_group.scale_to_fit_width(frame_width * 0.55)
-        if vis_group.height < middle_zone_height * 0.55:
-            vis_group.scale_to_fit_height(middle_zone_height * 0.55)
-        vis_group.move_to(middle_center)
+        # --- Bottom Zone: Calculations ---
+        # Step 1: Phase formula
+        step1_title = Text('ขั้นตอนที่ 1: หาสูตรเฟสของคลื่น', font='TH Sarabun New', font_size=26, color=BLUE_C)
+        eq_phi = MathTex(r'\phi = 2\pi ft', font_size=26, color=GREEN_C)
+        eq_phi1 = MathTex(r'\phi_1 = 2\pi f_1 t', font_size=26, color=BLUE_C)
+        eq_phi2 = MathTex(r'\phi_2 = 2\pi f_2 t', font_size=26, color=ORANGE)
 
-        self.play(Create(string_line), Create(left_wall), Create(right_wall))
-        self.play(Create(standing_wave_upper), Create(standing_wave_lower))
-        self.play(GrowFromCenter(brace_L), Write(L_label))
-        self.wait(2)
-
-        # Bottom Zone: Calculations
-        step1_title = Text('ขั้นตอนที่ 1: หาความยาวคลื่น (λ)', font='TH Sarabun New', font_size=26, color=BLUE_D)
-        eq1_text = Text('จากรูปคลื่นนิ่ง 3 ลูป (n=3) หรือ โอเวอร์โทนที่ 2:', font='TH Sarabun New', font_size=26, color=WHITE)
-        eq1 = MathTex(r'L = n\\frac{\\lambda}{2}', font_size=26, color=WHITE)
-        eq1_sub = MathTex(r'1.20 = 3 \\times \\frac{\\lambda}{2}', font_size=26, color=WHITE)
-        eq1_res = MathTex(r'\\lambda = \\frac{2 \\times 1.20}{3} = 0.8\\,\\mathrm{m}', font_size=26, color=GREEN_C)
-
-        step_group1 = VGroup(step1_title, eq1_text, eq1, eq1_sub, eq1_res).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
-        step_group1.scale_to_fit_width(frame_width * 0.88)
-        step_group1.scale_to_fit_height(bottom_zone_height * 0.88)
-        step_group1.move_to(bottom_center)
+        step1_group = VGroup(step1_title, eq_phi, eq_phi1, eq_phi2).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
+        step1_group.scale_to_fit_width(frame_width * 0.88)
+        step1_group.scale_to_fit_height(bottom_zone_height * 0.88)
+        step1_group.move_to(bottom_center)
 
         self.play(FadeIn(step1_title, shift=UP*0.15))
-        self.play(Write(eq1_text))
-        self.play(Write(eq1))
-        self.wait(1.5)
-        self.play(TransformMatchingTex(eq1, eq1_sub))
-        self.wait(1.5)
-        self.play(TransformMatchingTex(eq1_sub, eq1_res))
-        self.wait(2.5)
+        self.wait(0.8)
+        self.play(Write(eq_phi))
+        self.wait(7.5) # phi formula duration
+        self.play(Write(eq_phi1), Write(eq_phi2))
+        self.wait(8.0) # phi1 phi2 duration
 
-        step2_title = Text('ขั้นตอนที่ 2: หาอัตราเร็วคลื่น (v)', font='TH Sarabun New', font_size=26, color=BLUE_D)
-        eq2 = MathTex(r'v = f\\lambda', font_size=26, color=WHITE)
-        eq2_sub = MathTex(r'v = 320 \\times 0.8', font_size=26, color=WHITE)
-        
-        final_result_text = Text('อัตราเร็ว v = ', font='TH Sarabun New', font_size=26, color=GREEN_C)
-        final_result_math = MathTex(r'256\\,\\mathrm{m/s}', font_size=26, color=GREEN_C)
-        eq2_res_group = VGroup(final_result_text, final_result_math).arrange(RIGHT, buff=0.1)
+        # Step 2: Calculate Phase Difference (Δφ)
+        self.play(FadeOut(step1_group, shift=DOWN*0.1))
+        self.wait(0.5)
 
-        step_group2 = VGroup(step2_title, eq2, eq2_sub, eq2_res_group).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
-        step_group2.scale_to_fit_width(frame_width * 0.88)
-        step_group2.scale_to_fit_height(bottom_zone_height * 0.88)
-        step_group2.move_to(bottom_center)
+        step2_title = Text('ขั้นตอนที่ 2: หาเฟสที่ต่างกัน (Δφ)', font='TH Sarabun New', font_size=26, color=BLUE_C)
+        eq_delta_phi_def = MathTex(r'\Delta\phi = |\phi_2 - \phi_1|', font_size=26, color=GREEN_C)
+        eq_delta_phi_sub = MathTex(r'\Delta\phi = |2\pi f_2 t - 2\pi f_1 t|', font_size=26, color=GREEN_C)
+        eq_delta_phi_factor = MathTex(r'\Delta\phi = 2\pi |f_2 - f_1| t', font_size=26, color=GREEN_C)
+        eq_delta_phi_values = MathTex(r'\Delta\phi = 2\pi |122\,\mathrm{Hz} - 120\,\mathrm{Hz}| (1.2\,\mathrm{s})', font_size=26, color=GREEN_C)
+        eq_delta_phi_calc = MathTex(r'\Delta\phi = 2\pi (2)(1.2) = 4.8\pi\,\mathrm{rad}', font_size=26, color=GREEN_C)
 
-        self.play(FadeOut(step_group1, shift=DOWN*0.1), FadeIn(step_group2, shift=UP*0.1))
-        self.wait(1.5)
-        self.play(Write(eq2))
-        self.wait(1.5)
-        self.play(TransformMatchingTex(eq2, eq2_sub))
-        self.wait(1.5)
-        self.play(FadeOut(eq2_sub, shift=DOWN*0.1), FadeIn(eq2_res_group, shift=UP*0.1))
-        self.wait(2.5)
+        step2_group = VGroup(step2_title, eq_delta_phi_def, eq_delta_phi_sub, eq_delta_phi_factor, eq_delta_phi_values, eq_delta_phi_calc).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
+        step2_group.scale_to_fit_width(frame_width * 0.88)
+        step2_group.scale_to_fit_height(bottom_zone_height * 0.88)
+        step2_group.move_to(bottom_center)
 
-        self.play(FadeOut(problem_text, shift=DOWN*0.1), FadeOut(step_group2, shift=DOWN*0.1))
-        self.wait(1)
+        self.play(FadeIn(step2_title, shift=UP*0.15))
+        self.wait(0.8)
+        self.play(Write(eq_delta_phi_def))
+        self.wait(6.0) # delta phi def duration
+        self.play(Write(eq_delta_phi_sub))
+        self.wait(0.8)
+        self.play(TransformMatchingTex(eq_delta_phi_sub, eq_delta_phi_factor))
+        self.wait(8.0) # delta phi factor duration
+        self.play(Write(eq_delta_phi_values))
+        self.wait(8.5) # delta phi values duration
+        self.play(Write(eq_delta_phi_calc))
+        self.wait(5.5) # delta phi calc duration
+
+        # Final Answer
+        final_answer_text = VGroup(
+            Text('ดังนั้น เมื่อเวลาผ่านไป 1.2 วินาที คลื่นทั้งสอง', font='TH Sarabun New', font_size=26, color=GOLD_B),
+            Text('จะมีเฟสต่างกัน 4.8π เรเดียน', font='TH Sarabun New', font_size=26, color=GOLD_B),
+        ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
+        final_answer_text.scale_to_fit_width(frame_width * 0.88)
+        final_answer_text.scale_to_fit_height(bottom_zone_height * 0.88)
+        final_answer_text.move_to(bottom_center)
+
+        self.play(FadeOut(step2_group, shift=DOWN*0.1))
+        self.wait(0.5)
+        self.play(FadeIn(final_answer_text, shift=UP*0.15))
+        self.wait(6.5) # CTA duration
+        self.wait(1.0) # Final pause

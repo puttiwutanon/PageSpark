@@ -153,6 +153,64 @@ backslash ใน LaTeX จึงต้องเป็น 4 ตัวใน JSON 
 หมายเหตุ: r-string prefix ทำให้ Python ไม่ตีความ backslash ดังนั้น \\\\frac ใน JSON
 → \\frac ใน Python string → \frac ใน LaTeX ✓
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+กฎ 9: Axes ห้ามใหญ่เกินขนาด zone — กำหนด x_length/y_length ตามนี้เท่านั้น
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ระบบจะ ERROR ทันทีถ้า x_length เกิน 5.85 หรือ y_length เกิน 4.68
+
+❌ WRONG:
+    axes = Axes(
+        x_range=[0, 10, 1],
+        x_length=7.5,             # เกิน 5.85!
+        y_length=5.5,              # เกิน 4.68!
+    )
+
+✅ CORRECT — คำนวณจาก frame_width / middle_zone_height เสมอ:
+    axes = Axes(
+        x_range=[0, 10, 1],
+        x_length=frame_width * 0.60,        # = 5.4, ปลอดภัย
+        y_length=middle_zone_height * 0.65, # ปลอดภัยเสมอถ้า middle_zone_height คือ frame_height*0.45
+    )
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+กฎ 10: font_size ของ Text()/MathTex() ห้ามเกิน 28
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ระบบจะ ERROR ทันทีถ้า font_size ใน Text() หรือ MathTex() เกิน 28 (รวมถึง step titles, สมการยาว, final answer)
+
+❌ WRONG:
+    title = Text('ขั้นตอนที่ 1', font='TH Sarabun New', font_size=32, color=BLUE_C)
+    eq = MathTex(r'\Delta\phi = 2\pi|f_2-f_1|t', font_size=34, color=GREEN_C)
+
+✅ CORRECT — ใช้ 26-28 เสมอ ไม่ว่าข้อความจะยาวแค่ไหน:
+    title = Text('ขั้นตอนที่ 1', font='TH Sarabun New', font_size=26, color=BLUE_C)
+    eq = MathTex(r'\Delta\phi = 2\pi|f_2-f_1|t', font_size=26, color=GREEN_C)
+
+หากสมการยาวเกินไปจน scale_to_fit_width() บีบให้เล็กเกินอ่านไม่ออก
+ให้ตัดสมการเป็นหลายบรรทัดด้วย VGroup(...).arrange(DOWN, ...) แทนการเพิ่ม font_size
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+กฎ 11: ห้าม .next_to() ทิศเดียวกัน กับ object อ้างอิงเดียวกัน ตั้งแต่ 3 ครั้งขึ้นไป
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ระบบจะ ERROR ทันทีถ้าพบ label 3 ตัวขึ้นไปที่ .next_to(object_เดียวกัน, ทิศทาง_เดียวกัน) — labels จะวางซ้อนทับกันพอดี
+
+❌ WRONG (label_f1, label_f2, label_f3 ทับกันหมดเพราะ next_to ตัวเดียวกันทิศเดียวกัน):
+    label_f1 = Text('f1', ...).next_to(axes, UP)
+    label_f2 = Text('f2', ...).next_to(axes, UP)
+    label_f3 = Text('f3', ...).next_to(axes, UP)
+
+✅ CORRECT — ใช้ .next_to(จุดอ้างอิงที่ต่างกัน) หรือ .coords_to_point() แทน:
+    label_f1 = Text('f1', ...).next_to(
+        axes.coords_to_point(t_max*0.2, y_amp*0.8), UP, buff=0.1
+    )
+    label_f2 = Text('f2', ...).next_to(
+        axes.coords_to_point(t_max*0.8, y_amp*0.8), UP, buff=0.1
+    )
+
+หรือถ้าอ้าง object เดิม ให้สลับทิศทาง (UP/DOWN/LEFT/RIGHT) ให้แต่ละ label ไม่ซ้ำกัน
+
 ══════════════════════════════════════════════════════════
 """
 

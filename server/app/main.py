@@ -10,14 +10,14 @@ Changes vs original:
 
 import os
 import tempfile
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import List
-
+ 
 from app.core.prompts import LESSON_SUMMARY_SYSTEM_INSTRUCTION, QUIZ_GENERATION_SYSTEM_INSTRUCTION
 from app.services.manim_engine import Manim_Engine
 from app.services.code_validator import validate_episode_count
@@ -36,7 +36,7 @@ app = FastAPI(title="PageSpark API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -165,7 +165,11 @@ async def ingest_and_summarize(file: UploadFile = File(...)):
 
 
 @app.post("/api/generate-video")
-async def generate_video(file: UploadFile = File(...)):
+async def generate_video(
+    file: UploadFile = File(...),
+    uid: str = Form(default="anonymous"),
+    lesson_id: str = Form(default=None),
+):
     """
     Full pipeline: upload page → count questions → generate lesson JSON
     → enforce episode count → render all episodes → return video paths.
@@ -258,7 +262,7 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
         print("="*62 + "\n", flush=True)
 
         # ── Step 4: Render all episodes ──────────────────────────────────────
-        render_results = engine.render_all_episodes(lesson_json)
+        render_results = engine.render_all_episodes(lesson_json, uid=uid, lesson_id=lesson_id)
 
         return {
             "status": "success",
