@@ -28,110 +28,94 @@ class PhysicsScene(Scene):
         middle_center = np.array([0, middle_zone_center_y, 0])
         bottom_center = np.array([0, bottom_zone_center_y, 0])
 
-        # Problem 59 variables
-        L_val = 1.25 # m
-        v_val = 160 # m/s
-        n_val = 1 # From diagram (1 loop)
-        lambda_val = 2 * L_val / n_val # 2.5 m
-        f_val = v_val / lambda_val # 64 Hz
-
-        # Top Zone: Problem Statement
-        problem_text = VGroup(
-            Text('59. เชือกเบาเส้นหนึ่งยาว 1.25 เมตร ถูกขึงตึงที่ปลายทั้งสองข้าง เมื่อทำให้เชือกสั่น', font='TH Sarabun New', font_size=28, color=GRAY_A),
-            Text('วัดอัตราเร็วได้ 160 เมตรต่อวินาที ถ้าคลื่นในเส้นเชือกเกิดการสั่นพ้องได้ต้องให้', font='TH Sarabun New', font_size=28, color=GRAY_A),
-            Text('ความถี่เข้าไปเท่าไร', font='TH Sarabun New', font_size=28, color=GRAY_A),
+        # Top Zone
+        title = Text('การเคลื่อนที่แบบโพรเจกไทล์: ทิ้งระเบิด', font='TH Sarabun New', font_size=28, color=GOLD_B)
+        problem = VGroup(
+            Text('เครื่องบินสูง 2000 m บินเร็ว 200 m/s', font='TH Sarabun New', font_size=24, color=GRAY_A),
+            Text('หา: ก. ระยะตกไกล  ข. ความเร็วชนพื้น', font='TH Sarabun New', font_size=24, color=GRAY_A)
         ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
-        if problem_text.width > frame_width * 0.88:
-            problem_text.scale_to_fit_width(frame_width * 0.88)
-        if problem_text.height > top_zone_height * 0.88:
-            problem_text.scale_to_fit_height(top_zone_height * 0.88)
-        problem_text.move_to(top_center)
-        self.play(FadeIn(problem_text, shift=UP*0.15))
-        self.wait(1.5)
+        top_group = VGroup(title, problem).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        top_group.scale_to_fit_width(frame_width * 0.88)
+        top_group.move_to(top_center)
+        self.play(FadeIn(top_group, shift=UP*0.15))
 
-        # Middle Zone: Visualization - Standing Wave (n=1)
-        string_line = Line(start=LEFT*3, end=RIGHT*3, color=WHITE, stroke_width=2)
-        left_wall = Line(start=string_line.get_left() + UP*0.5, end=string_line.get_left() + DOWN*0.5, color=GRAY_A, stroke_width=3)
-        right_wall = Line(start=string_line.get_right() + UP*0.5, end=string_line.get_right() + DOWN*0.5, color=GRAY_A, stroke_width=3)
-
-        standing_wave_upper = FunctionGraph(
-            lambda x: 0.8 * np.sin(np.pi * (x + 3) / 6), # 1 loop over length 6
-            x_range=[-3, 3],
-            color=BLUE_C
+        # Middle Zone - Visualization
+        axes = Axes(
+            x_range=[0, 5000, 1000],
+            y_range=[0, 2500, 500],
+            x_length=frame_width * 0.60,
+            y_length=middle_zone_height * 0.65,
+            axis_config={
+                'color': GRAY_C,
+                'stroke_width': 2,
+                'include_tip': True,
+                'tip_length': 0.15,
+                'tip_width': 0.10,
+            }
         )
-        standing_wave_lower = FunctionGraph(
-            lambda x: -0.8 * np.sin(np.pi * (x + 3) / 6),
-            x_range=[-3, 3],
-            color=BLUE_C
+        x_label = axes.get_x_axis_label(
+            Text('ระยะทาง x (m)', font='TH Sarabun New', font_size=18, color=GRAY_A),
+            edge=DOWN, direction=DOWN, buff=0.3
         )
-        
-        brace_L = BraceBetweenPoints(string_line.get_left(), string_line.get_right(), direction=DOWN)
-        L_label = VGroup(
-            MathTex(r'L = ', font_size=26, color=GOLD_B),
-            MathTex(f'{L_val}\\\,\\\mathrm{{m}}', font_size=26, color=GOLD_B)
-        ).arrange(RIGHT, buff=0.1).next_to(brace_L, DOWN, buff=0.1)
-
-        vis_group = VGroup(
-            string_line, left_wall, right_wall,
-            standing_wave_upper, standing_wave_lower,
-            brace_L, L_label
+        y_label = axes.get_y_axis_label(
+            Text('ความสูง y (m)', font='TH Sarabun New', font_size=18, color=GRAY_A).rotate(90 * DEGREES),
+            edge=LEFT, direction=LEFT, buff=0.3
         )
-        
-        vis_group.scale_to_fit_width(frame_width * 0.88)
-        vis_group.scale_to_fit_height(middle_zone_height * 0.82)
-        if vis_group.width < frame_width * 0.55:
-            vis_group.scale_to_fit_width(frame_width * 0.55)
-        if vis_group.height < middle_zone_height * 0.55:
-            vis_group.scale_to_fit_height(middle_zone_height * 0.55)
-        vis_group.move_to(middle_center)
 
-        self.play(Create(string_line), Create(left_wall), Create(right_wall))
-        self.play(Create(standing_wave_upper), Create(standing_wave_lower))
-        self.play(GrowFromCenter(brace_L), Write(L_label))
-        self.wait(2)
+        def traj(t):
+            x = 200 * t
+            y = 2000 - 5 * (t**2)
+            return axes.coords_to_point(x, y)
 
-        # Bottom Zone: Calculations
-        step1_title = Text('ขั้นตอนที่ 1: หาความยาวคลื่น (λ)', font='TH Sarabun New', font_size=26, color=BLUE_D)
-        eq1_text = Text('จากรูปคลื่นนิ่ง 1 ลูป (n=1):', font='TH Sarabun New', font_size=26, color=WHITE)
-        eq1 = MathTex(r'L = n\\frac{\\lambda}{2}', font_size=26, color=WHITE)
-        eq1_sub = MathTex(r'1.25 = 1 \\times \\frac{\\lambda}{2}', font_size=26, color=WHITE)
-        eq1_res = MathTex(r'\\lambda = 2 \\times 1.25 = 2.5\\,\\mathrm{m}', font_size=26, color=GREEN_C)
+        path = ParametricFunction(traj, t_range=[0, 20], color=TEAL_C, stroke_width=4)
 
-        step_group1 = VGroup(step1_title, eq1_text, eq1, eq1_sub, eq1_res).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
-        step_group1.scale_to_fit_width(frame_width * 0.88)
-        step_group1.scale_to_fit_height(bottom_zone_height * 0.88)
-        step_group1.move_to(bottom_center)
+        h_line = DashedLine(axes.coords_to_point(0, 2000), axes.coords_to_point(4000, 2000), color=GRAY_B)
+        v_line = DashedLine(axes.coords_to_point(4000, 0), axes.coords_to_point(4000, 2000), color=GRAY_B)
 
-        self.play(FadeIn(step1_title, shift=UP*0.15))
-        self.play(Write(eq1_text))
+        sy_label = Text('Sy = 2000 m', font='TH Sarabun New', font_size=18, color=BLUE_C).move_to(axes.coords_to_point(0, 1000) + LEFT * 0.6)
+        sx_label = Text('Sx = 4000 m', font='TH Sarabun New', font_size=18, color=GREEN_C).move_to(axes.coords_to_point(2000, 0) + DOWN * 0.4)
+
+        axes_group = VGroup(axes, x_label, y_label, path, h_line, v_line, sy_label, sx_label)
+        axes_group.scale_to_fit_width(frame_width * 0.88)
+        axes_group.scale_to_fit_height(middle_zone_height * 0.82)
+        axes_group.move_to(middle_center)
+
+        self.play(Create(axes), Write(x_label), Write(y_label))
+        self.play(Create(h_line), Create(v_line), Write(sy_label), Write(sx_label))
+        self.play(Create(path), run_time=2)
+        self.wait(0.8)
+
+        # Bottom Zone - Equations
+        step1_title = Text('ก. หาระยะตกไกลแนวราบ (Sx)', font='TH Sarabun New', font_size=26, color=GOLD_B)
+        eq1 = MathTex(r'S_y = \frac{1}{2} g t^2 \Rightarrow 2000 = 5 t^2 \Rightarrow t = 20\,\mathrm{s}', font_size=26, color=WHITE)
+        eq2 = MathTex(r'S_x = u_x t = 200 \times 20', font_size=26, color=WHITE)
+        eq3 = MathTex(r'S_x = 4000\,\mathrm{m}', font_size=26, color=GREEN_C)
+
+        step1_group = VGroup(step1_title, eq1, eq2, eq3).arrange(DOWN, aligned_edge=LEFT, buff=0.2)
+        step1_group.scale_to_fit_width(frame_width * 0.88)
+        step1_group.move_to(bottom_center)
+
+        self.play(Write(step1_title))
         self.play(Write(eq1))
-        self.wait(1.5)
-        self.play(TransformMatchingTex(eq1, eq1_sub))
-        self.wait(1.5)
-        self.play(TransformMatchingTex(eq1_sub, eq1_res))
-        self.wait(2.5)
-
-        step2_title = Text('ขั้นตอนที่ 2: หาความถี่ (f)', font='TH Sarabun New', font_size=26, color=BLUE_D)
-        eq2 = MathTex(r'v = f\\lambda', font_size=26, color=WHITE)
-        eq2_sub = MathTex(r'160 = f \\times 2.5', font_size=26, color=WHITE)
-        
-        final_result_text = Text('ความถี่ f = ', font='TH Sarabun New', font_size=26, color=GREEN_C)
-        final_result_math = MathTex(r'64\\,\\mathrm{Hz}', font_size=26, color=GREEN_C)
-        eq2_res_group = VGroup(final_result_text, final_result_math).arrange(RIGHT, buff=0.1)
-
-        step_group2 = VGroup(step2_title, eq2, eq2_sub, eq2_res_group).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
-        step_group2.scale_to_fit_width(frame_width * 0.88)
-        step_group2.scale_to_fit_height(bottom_zone_height * 0.88)
-        step_group2.move_to(bottom_center)
-
-        self.play(FadeOut(step_group1, shift=DOWN*0.1), FadeIn(step_group2, shift=UP*0.1))
-        self.wait(1.5)
+        self.wait(0.5)
         self.play(Write(eq2))
+        self.play(Write(eq3))
         self.wait(1.5)
-        self.play(TransformMatchingTex(eq2, eq2_sub))
-        self.wait(1.5)
-        self.play(FadeOut(eq2_sub, shift=DOWN*0.1), FadeIn(eq2_res_group, shift=UP*0.1))
-        self.wait(2.5)
 
-        self.play(FadeOut(problem_text, shift=DOWN*0.1), FadeOut(step_group2, shift=DOWN*0.1))
-        self.wait(1)
+        self.play(FadeOut(step1_group, shift=DOWN*0.1))
+
+        step2_title = Text('ข. หาอัตราเร็วขณะกระทบพื้น (v)', font='TH Sarabun New', font_size=26, color=GOLD_B)
+        eq4 = MathTex(r'v_x = 200\,\mathrm{m/s},\quad v_y = gt = 10(20) = 200\,\mathrm{m/s}', font_size=26, color=WHITE)
+        eq5 = MathTex(r'v = \sqrt{v_x^2 + v_y^2} = \sqrt{200^2 + 200^2}', font_size=26, color=WHITE)
+        eq6 = MathTex(r'v = 200\sqrt{2} \approx 282.8\,\mathrm{m/s}', font_size=26, color=GREEN_C)
+
+        step2_group = VGroup(step2_title, eq4, eq5, eq6).arrange(DOWN, aligned_edge=LEFT, buff=0.2)
+        step2_group.scale_to_fit_width(frame_width * 0.88)
+        step2_group.move_to(bottom_center)
+
+        self.play(Write(step2_title))
+        self.play(Write(eq4))
+        self.wait(0.5)
+        self.play(Write(eq5))
+        self.play(Write(eq6))
+        self.wait(2.0)

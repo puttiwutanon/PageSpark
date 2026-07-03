@@ -28,158 +28,141 @@ class PhysicsScene(Scene):
         middle_center = np.array([0, middle_zone_center_y, 0])
         bottom_center = np.array([0, bottom_zone_center_y, 0])
 
-        # --- Problem Constants ---
-        f_val = 500  # Hz
-        v_val = 400  # m/s
-        lambda_val = v_val / f_val  # 0.8 m
-        dist_nodes_val = lambda_val / 2  # 0.4 m
-
-        # --- Top Zone: Problem Statement ---
-        problem_text = VGroup(
-            Text('ในการทดลองคลื่นนิ่งบนเส้นเชือก ถ้าความถี่ของคลื่นนิ่งเป็น 500 เฮิรตซ์', font='TH Sarabun New', font_size=28, color=GRAY_A),
-            Text('และอัตราเร็วของคลื่นในเส้นเชือกเท่ากับ 400 เมตรต่อวินาที', font='TH Sarabun New', font_size=28, color=GRAY_A),
-            Text('ตำแหน่งบัพสองตำแหน่งที่อยู่ถัดกันจะห่างกันเท่าไร', font='TH Sarabun New', font_size=28, color=GRAY_A),
-        ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
-        if problem_text.width > frame_width * 0.88:
-            problem_text.scale_to_fit_width(frame_width * 0.88)
-        if problem_text.height > top_zone_height * 0.88:
-            problem_text.scale_to_fit_height(top_zone_height * 0.88)
-        problem_text.move_to(top_center)
-
-        self.play(FadeIn(problem_text, shift=UP * 0.15))
-        self.wait(2.5)
-
-        # --- Middle Zone: Visualization of Standing Wave ---
-        x_min_wave = 0
-        x_max_wave = lambda_val * 2.5 # Show a bit more than two wavelengths for context
-        x_step_wave = lambda_val / 2
-
+        # --- TOP ZONE: Title & Problem ---
+        title = Text('การเคลื่อนที่แบบโพรเจกไทล์แนวราบ', font='TH Sarabun New', font_size=28, color=GOLD_B)
+        problem_line1 = Text('ปาวัตถุออกไปในแนวระดับจากที่สูง 80 เมตร', font='TH Sarabun New', font_size=24, color=GRAY_A)
+        problem_line2 = Text('ตกห่างจากจุดปาในแนวราบ 20 เมตร จงหาอัตราเร็วต้น', font='TH Sarabun New', font_size=24, color=GRAY_A)
+        
+        top_group = VGroup(title, problem_line1, problem_line2).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
+        if top_group.width > frame_width * 0.88:
+            top_group.scale_to_fit_width(frame_width * 0.88)
+        if top_group.height > top_zone_height * 0.88:
+            top_group.scale_to_fit_height(top_zone_height * 0.88)
+        top_group.move_to(top_center)
+        
+        self.play(FadeIn(top_group, shift=UP*0.2))
+        self.wait(2.0)
+        # --- MIDDLE ZONE: Visualization ---
         axes = Axes(
-            x_range=[x_min_wave, x_max_wave, x_step_wave],
-            y_range=[-1, 1, 0.5], # Amplitude for visualization
-            x_length=frame_width * 0.60, # Clamped x_length
-            y_length=middle_zone_height * 0.30, # Shorter y-length for wave
+            x_range=[0, 25, 5],
+            y_range=[0, 100, 20],
+            x_length=5.0,
+            y_length=4.0,
             axis_config={
                 'color': GRAY_C,
                 'stroke_width': 2,
                 'include_tip': True,
                 'tip_length': 0.15,
                 'tip_width': 0.10,
-            },
-            x_axis_config={'include_numbers': True, 'font_size': 16, 'color': GRAY_B},
-            y_axis_config={'include_numbers': False}, # No numbers on y-axis for wave amplitude
+            }
         )
         x_label = axes.get_x_axis_label(
-            Text('ระยะทาง (m)', font='TH Sarabun New', font_size=18, color=GRAY_A),
-            edge=DOWN, direction=DOWN, buff=0.35
+            Text('ระยะราบ (m)', font='TH Sarabun New', font_size=16, color=GRAY_A),
+            edge=DOWN, direction=DOWN, buff=0.25
         )
+        y_label = axes.get_y_axis_label(
+            Text('ความสูง (m)', font='TH Sarabun New', font_size=16, color=GRAY_A).rotate(90 * DEGREES),
+            edge=LEFT, direction=LEFT, buff=0.25
+        )
+        
+        height_line = DashedLine(
+            axes.coords_to_point(0, 0),
+            axes.coords_to_point(0, 80),
+            color=RED_C,
+            stroke_width=2
+        )
+        height_label = Text('h = 80 m', font='TH Sarabun New', font_size=14, color=RED_C).next_to(height_line, LEFT, buff=0.1)
+        
+        range_line = DashedLine(
+            axes.coords_to_point(0, 0),
+            axes.coords_to_point(20, 0),
+            color=BLUE_C,
+            stroke_width=2
+        )
+        range_label = Text('s_x = 20 m', font='TH Sarabun New', font_size=14, color=BLUE_C).next_to(range_line, DOWN, buff=0.1)
+        
+        axes_group = VGroup(axes, x_label, y_label, height_line, height_label, range_line, range_label)
+        axes_group.scale_to_fit_width(frame_width * 0.85)
+        axes_group.scale_to_fit_height(middle_zone_height * 0.80)
+        axes_group.move_to(middle_center)
+        
+        self.play(Create(axes), FadeIn(x_label), FadeIn(y_label))
+        self.wait(1.0)
+        self.play(Create(height_line), FadeIn(height_label), Create(range_line), FadeIn(range_label))
+        self.wait(1.0)
+        
+        # Trajectory: x(t) = 5*t, y(t) = 80 - 5*t^2 for t in [0, 4]
+        def traj_func(t):
+            x = 5.0 * t
+            y = 80.0 - 5.0 * (t**2)
+            return axes.coords_to_point(x, y)
+        
+        path = ParametricFunction(traj_func, t_range=[0, 4], color=TEAL_C, stroke_width=4)
+        
+        # Animate dot moving along trajectory
+        dot = Dot(color=YELLOW_C, radius=0.08)
+        dot.move_to(axes.coords_to_point(0, 80))
+        
+        t_tracker = ValueTracker(0)
+        dot.add_updater(lambda d: d.move_to(traj_func(t_tracker.get_value())))
+        
+        self.add(dot)
+        self.play(
+            Create(path),
+            t_tracker.animate.set_value(4),
+            run_time=4.0,
+            rate_func=linear
+        )
+        dot.clear_updaters()
+        self.wait(2.0)
 
-        # Wave function for standing wave envelope
-        def wave_func(x):
-            k = 2 * np.pi / lambda_val
-            return 0.7 * np.sin(k * x) # 0.7 is amplitude for visualization
-
-        wave_graph = axes.plot(wave_func, x_range=[x_min_wave, x_max_wave], color=TEAL_C)
-
-        # Nodes (where y = 0)
-        node_dots = VGroup()
-        # Iterate to place nodes at 0, lambda/2, lambda, 3*lambda/2, ...
-        for i in range(int(x_max_wave / (lambda_val / 2)) + 1):
-            node_x = i * (lambda_val / 2)
-            node_dot = Dot(axes.coords_to_point(node_x, 0), color=RED_C, radius=0.08)
-            node_dots.add(node_dot)
-
-        # Highlight two adjacent nodes for the answer
-        # Let's pick the first two nodes after x=0 for clarity (at lambda/2 and lambda)
-        node1_for_brace_pos = axes.coords_to_point(lambda_val/2, 0)
-        node2_for_brace_pos = axes.coords_to_point(lambda_val, 0)
-
-        brace_nodes = BraceBetweenPoints(node1_for_brace_pos, node2_for_brace_pos, direction=UP, buff=0.1)
-        brace_label = MathTex(r'\\frac{\\lambda}{2}', font_size=22, color=GOLD_B).next_to(brace_nodes, UP, buff=0.1)
-        brace_value_text = VGroup(
-            MathTex(r'0.4', font_size=22, color=GOLD_B),
-            Text(' m', font='TH Sarabun New', font_size=22, color=GOLD_B)
-        ).arrange(RIGHT, buff=0.05).next_to(brace_label, UP, buff=0.1)
-
-        # Group all visualization elements
-        wave_viz_group = VGroup(axes, x_label, wave_graph, node_dots, brace_nodes, brace_label, brace_value_text)
-
-        # Apply clamping to the entire visualization group
-        wave_viz_group.scale_to_fit_width(frame_width * 0.88)
-        wave_viz_group.scale_to_fit_height(middle_zone_height * 0.82)
-        if wave_viz_group.width < frame_width * 0.55:
-            wave_viz_group.scale_to_fit_width(frame_width * 0.55)
-        if wave_viz_group.height < middle_zone_height * 0.55:
-            wave_viz_group.scale_to_fit_height(middle_zone_height * 0.55)
-        wave_viz_group.move_to(middle_center)
-
-        self.play(Create(axes), Create(x_label))
-        self.play(Create(wave_graph), GrowFromCenter(node_dots))
-        self.play(Create(brace_nodes), Write(brace_label), Write(brace_value_text))
-        self.wait(3)
-
-        # --- Bottom Zone: Step 1 - Given Values ---
-        step1_title = Text('ขั้นตอนที่ 1: ระบุค่าที่โจทย์กำหนด', font='TH Sarabun New', font_size=26, color=BLUE_D)
-        given_f = VGroup(
-            Text('ความถี่ (f) =', font='TH Sarabun New', font_size=26, color=GRAY_A),
-            MathTex(r'500\,\mathrm{Hz}', font_size=26, color=GREEN_C)
-        ).arrange(RIGHT, buff=0.1)
-        given_v = VGroup(
-            Text('อัตราเร็วคลื่น (v) =', font='TH Sarabun New', font_size=26, color=GRAY_A),
-            MathTex(r'400\,\mathrm{m/s}', font_size=26, color=GREEN_C)
-        ).arrange(RIGHT, buff=0.1)
-
-        step1_group = VGroup(step1_title, given_f, given_v).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
-        step1_group.scale_to_fit_width(frame_width * 0.88)
-        step1_group.scale_to_fit_height(bottom_zone_height * 0.88)
+        # --- BOTTOM ZONE: Step 1 Solve ---
+        step1_title = Text('ขั้นตอนที่ 1: หาเวลา (t) จากแนวดิ่ง', font='TH Sarabun New', font_size=24, color=GOLD_B)
+        step1_eq1 = MathTex(r's_y = u_y t + \frac{1}{2} g t^2', font_size=24, color=WHITE)
+        step1_eq2 = MathTex(r'80 = 0 + \frac{1}{2}(10)t^2', font_size=24, color=WHITE)
+        step1_eq3 = MathTex(r'80 = 5t^2 \implies t^2 = 16', font_size=24, color=WHITE)
+        step1_eq4 = MathTex(r't = 4\text{ s}', font_size=24, color=GREEN_C)
+        
+        step1_group = VGroup(step1_title, step1_eq1, step1_eq2, step1_eq3, step1_eq4).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        step1_group.scale_to_fit_width(frame_width * 0.85)
+        step1_group.scale_to_fit_height(bottom_zone_height * 0.85)
         step1_group.move_to(bottom_center)
+        
+        self.play(FadeIn(step1_title, shift=UP*0.1))
+        self.wait(1.5)
+        self.play(Write(step1_eq1))
+        self.wait(2.0)
+        self.play(Write(step1_eq2))
+        self.wait(2.0)
+        self.play(Write(step1_eq3))
+        self.wait(2.0)
+        self.play(Write(step1_eq4))
+        self.wait(3.0)
 
-        self.play(FadeIn(step1_group, shift=UP * 0.15))
-        self.wait(3)
-
-        # --- Bottom Zone: Step 2 - Calculate Wavelength (lambda) ---
-        step2_title = Text('ขั้นตอนที่ 2: คำนวณความยาวคลื่น (λ)', font='TH Sarabun New', font_size=26, color=BLUE_D)
-        formula_vfl = MathTex(r'v = f\lambda', font_size=26, color=ORANGE)
-        sub_values = MathTex(r'400 = 500 \times \lambda', font_size=26, color=ORANGE)
-        calc_lambda_eq = MathTex(r'\lambda = \frac{400}{500} = 0.8\,\mathrm{m}', font_size=26, color=GREEN_C)
-
-        step2_group = VGroup(step2_title, formula_vfl, sub_values, calc_lambda_eq).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
-        step2_group.scale_to_fit_width(frame_width * 0.88)
-        step2_group.scale_to_fit_height(bottom_zone_height * 0.88)
+        # --- BOTTOM ZONE: Step 2 Solve ---
+        self.play(FadeOut(step1_group, shift=DOWN*0.1))
+        self.wait(0.5)
+        
+        step2_title = Text('ขั้นตอนที่ 2: หาอัตราเร็วต้น (u_x) จากแนวราบ', font='TH Sarabun New', font_size=24, color=GOLD_B)
+        step2_eq1 = MathTex(r's_x = u_x t', font_size=24, color=WHITE)
+        step2_eq2 = MathTex(r'20 = u_x (4)', font_size=24, color=WHITE)
+        step2_eq3 = MathTex(r'u_x = \frac{20}{4}', font_size=24, color=WHITE)
+        ans_label = Text('คำตอบ:', font='TH Sarabun New', font_size=24, color=GOLD_B)
+        ans_val = MathTex(r'u_x = 5\text{ m/s}', font_size=24, color=GREEN_C)
+        ans_group = VGroup(ans_label, ans_val).arrange(RIGHT, buff=0.2)
+        
+        step2_group = VGroup(step2_title, step2_eq1, step2_eq2, step2_eq3, ans_group).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        step2_group.scale_to_fit_width(frame_width * 0.85)
+        step2_group.scale_to_fit_height(bottom_zone_height * 0.85)
         step2_group.move_to(bottom_center)
-
-        self.play(FadeOut(step1_group, shift=DOWN * 0.1), FadeIn(step2_group, shift=UP * 0.15))
-        self.wait(4)
-
-        # --- Bottom Zone: Step 3 - Calculate Distance Between Nodes ---
-        step3_title = Text('ขั้นตอนที่ 3: คำนวณระยะห่างระหว่างบัพ', font='TH Sarabun New', font_size=26, color=BLUE_D)
-        # Rule 3: No Thai in MathTex. Split 'ระยะห่างบัพ' to Text.
-        formula_dist_thai = VGroup(
-            Text('ระยะห่างบัพ =', font='TH Sarabun New', font_size=26, color=ORANGE),
-            MathTex(r'\frac{\lambda}{2}', font_size=26, color=ORANGE)
-        ).arrange(RIGHT, buff=0.1)
-
-        calc_dist_eq = MathTex(r'= \frac{0.8}{2} = 0.4\,\mathrm{m}', font_size=26, color=GREEN_C)
-
-        final_answer_text = VGroup(
-            Text('ดังนั้น ตำแหน่งบัพสองตำแหน่งที่อยู่ถัดกันจะห่างกัน', font='TH Sarabun New', font_size=26, color=GRAY_A),
-            MathTex(r'0.4\,\mathrm{m}', font_size=26, color=GREEN_C)
-        ).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
-
-        step3_group = VGroup(step3_title, formula_dist_thai, calc_dist_eq, final_answer_text).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
-        step3_group.scale_to_fit_width(frame_width * 0.88)
-        step3_group.scale_to_fit_height(bottom_zone_height * 0.88)
-        step3_group.move_to(bottom_center)
-
-        self.play(FadeOut(step2_group, shift=DOWN * 0.1), FadeIn(step3_group, shift=UP * 0.15))
-        self.wait(5)
-
-        # Final highlight of the answer on the visualization (replacing Indicate)
-        answer_highlight = brace_value_text.copy().scale(1.2).set_color(YELLOW_C)
-        self.play(FadeIn(answer_highlight, scale=1.2))
-        self.wait(1)
-        self.play(FadeOut(answer_highlight))
-        self.wait(0.5)
-
-        self.play(FadeOut(problem_text, shift=UP*0.1), FadeOut(wave_viz_group, shift=UP*0.1), FadeOut(step3_group, shift=DOWN*0.1))
-        self.wait(0.5)
+        
+        self.play(FadeIn(step2_title, shift=UP*0.1))
+        self.wait(1.5)
+        self.play(Write(step2_eq1))
+        self.wait(2.0)
+        self.play(Write(step2_eq2))
+        self.wait(2.0)
+        self.play(Write(step2_eq3))
+        self.wait(2.0)
+        self.play(FadeIn(ans_group, shift=UP*0.1))
+        self.wait(5.0)

@@ -14,7 +14,12 @@ from app.storage.video_storage import upload_episode_video
 from pydantic import BaseModel
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO)
+
+# Enhanced logging configuration
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 2
@@ -179,6 +184,7 @@ class Manim_Engine:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
         self.gemini_client = genai.Client()
+        logger.info(f"🚀 Manim_Engine initialized with output_dir: {output_dir}")
 
     def _validate_code(self, code_string: str) -> tuple[bool, str]:
         forbidden = {
@@ -215,6 +221,7 @@ class Manim_Engine:
         code = "\n".join(episode_data["manim_code_lines"])
         with open(filepath, "w", encoding="utf-8") as fh:
             fh.write(code)
+        logger.debug(f"📝 Wrote scene file: {filepath} ({len(code)} chars)")
         return filepath, code
 
     def _resolve_rendered_mp4_path(self, scene_filepath: str) -> str:
@@ -225,19 +232,38 @@ class Manim_Engine:
         flag in _run_manim, update "480p15" here to match.
         """
         stem = os.path.splitext(os.path.basename(scene_filepath))[0]
-        return os.path.join(self.output_dir, "videos", stem, "480p15", "PhysicsScene.mp4")
+        mp4_path = os.path.join(self.output_dir, "videos", stem, "480p15", "PhysicsScene.mp4")
+        logger.debug(f"📹 Expected MP4 path: {mp4_path}")
+        return mp4_path
 
     def _run_manim(self, filepath: str) -> tuple[bool, str]:
         cmd = ["manim", "-ql", filepath, "PhysicsScene", "--media_dir", self.output_dir]
+        logger.info(f"🎬 Running manim command: {' '.join(cmd)}")
+        
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
             output = result.stdout
+            
+            # Log first few lines of output for debugging
+            output_lines = output.splitlines()
+            logger.info(f"📺 Manim output preview (first 10 lines):")
+            for line in output_lines[:10]:
+                logger.info(f"  {line}")
+            
             if "Played 0 animations" in output:
+                logger.warning("⚠️ Render produced 0 animations — empty construct() body.")
                 return False, "Render produced 0 animations — empty construct() body.\n" + output
+            
+            logger.info("✅ Manim render completed successfully!")
             return True, output
+            
         except subprocess.CalledProcessError as exc:
-            return False, exc.stderr or exc.stdout
+            error_output = exc.stderr or exc.stdout or ""
+            logger.error(f"❌ Manim render failed with error code {exc.returncode}")
+            logger.error(f"Error output: {error_output[:500]}")
+            return False, error_output
         except subprocess.TimeoutExpired:
+            logger.error("❌ Manim render timed out after 300 seconds.")
             return False, "Render timed out after 300 seconds."
 
     def _ask_gemini_to_fix(
@@ -246,6 +272,8 @@ class Manim_Engine:
         error_message: str,
         violation_summary: str | None = None,
     ) -> list[str] | None:
+        logger.info("🔄 Asking Gemini for code fix...")
+        
         violation_block = ""
         if violation_summary:
             violation_block = (
@@ -262,7 +290,7 @@ class Manim_Engine:
         for backoff in range(3):
             try:
                 response = self.gemini_client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.5-flash",
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         temperature=0.1,
@@ -286,6 +314,7 @@ class Manim_Engine:
 
                 lines = parsed.get("manim_code_lines")
                 if isinstance(lines, list) and lines:
+                    logger.info(f"✅ Gemini provided fix with {len(lines)} lines")
                     return lines
                 logger.warning("Gemini fix response had no manim_code_lines field.")
                 return None
@@ -335,6 +364,8 @@ class Manim_Engine:
         (caller should fall back to the full-file _ask_gemini_to_fix or
         render with auto-fixed code as-is).
         """
+        logger.info(f"🔧 Asking Gemini for targeted line fix ({len(violations)} violations)")
+        
         lines = code.splitlines()
 
         # Build one context block per violation, each tagged with a stable
@@ -367,7 +398,7 @@ class Manim_Engine:
         for backoff in range(3):
             try:
                 response = self.gemini_client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.5-flash",
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         temperature=0.1,
@@ -412,7 +443,7 @@ class Manim_Engine:
                     logger.warning("Gemini line-fix returned no applicable fixes.")
                     return None
 
-                logger.info(f"Line-fix: applied {applied}/{len(violations)} targeted patches.")
+                logger.info(f"✅ Line-fix: applied {applied}/{len(violations)} targeted patches.")
                 return "\n".join(patched_lines)
 
             except Exception as exc:
@@ -444,16 +475,23 @@ class Manim_Engine:
     ) -> dict:
         episodes = lesson_json.get("episodes", [])
         actual = len(episodes)
+        
+        logger.info(f"📊 Episode count check: expected={expected_count}, actual={actual}")
+        
         if actual >= expected_count:
+            logger.info(f"✅ Episode count OK ({actual} >= {expected_count})")
             return lesson_json
+            
         logger.warning(
-            f"enforce_episode_count: expected {expected_count}, got {actual}. "
+            f"⚠️ Episode count mismatch: expected {expected_count}, got {actual}. "
             f"Stubbing {expected_count - actual} episode(s)."
         )
+        
         for i in range(actual + 1, expected_count + 1):
             title = (question_titles[i - 1]
                      if question_titles and len(question_titles) >= i
                      else f"โจทย์ข้อ {i}")
+            logger.info(f"📝 Creating stub episode {i}: '{title}'")
             episodes.append({
                 "episode_number": i,
                 "title": title,
@@ -480,35 +518,41 @@ class Manim_Engine:
             })
         lesson_json["episodes"] = episodes
         lesson_json["total_episodes"] = expected_count
+        logger.info(f"✅ Episode count enforced: now {len(episodes)} episodes")
         return lesson_json
 
     def render_episode(self, episode_data: dict, *, uid: str | None = None, lesson_id: str | None = None) -> dict:
         ep_num = episode_data.get("episode_number", 0)
+        logger.info(f"🔄 ===== STARTING RENDER for episode {ep_num} =====")
+        logger.info(f"   uid={uid}, lesson_id={lesson_id}")
+        logger.info(f"   title={episode_data.get('title', 'Untitled')}")
+        
         filename = f"scene_ep_{ep_num}.py"
         current_data = dict(episode_data)
         render_output = "No render attempted yet."
 
         for attempt in range(1, MAX_RETRIES + 2):
-            logger.info(f"Episode {ep_num} — render attempt {attempt}/{MAX_RETRIES + 1}")
+            logger.info(f"📹 Episode {ep_num} — render attempt {attempt}/{MAX_RETRIES + 1}")
 
             # ── Step 0: Deterministic pre-processor ─────────────────────────
             raw_code = "\n".join(current_data["manim_code_lines"])
             val = preprocess_code(raw_code)
 
             if val.auto_fixes:
-                logger.info(f"  Auto-fixes ({len(val.auto_fixes)}):")
+                logger.info(f"  🔧 Auto-fixes ({len(val.auto_fixes)}):")
                 for fix in val.auto_fixes:
                     logger.info(f"    • {fix}")
 
             if val.has_violations:
                 logger.warning(
-                    f"Ep {ep_num} attempt {attempt}: "
+                    f"  ⚠️ Ep {ep_num} attempt {attempt}: "
                     f"{len(val.violations)} violations after auto-fix:"
                 )
                 for v in val.violations:
                     logger.warning(f"    [{v.rule}] line {v.line}: {v.snippet[:60]}")
 
                 if attempt > MAX_RETRIES:
+                    logger.error(f"❌ Episode {ep_num}: Violations not resolved after {MAX_RETRIES} retries")
                     return {
                         "status": "error",
                         "message": (
@@ -529,7 +573,7 @@ class Manim_Engine:
                 # Targeted line-fix failed/unavailable — fall back to the
                 # full-file fixer once before giving up on this attempt.
                 logger.warning(
-                    f"Ep {ep_num}: targeted line-fix failed, "
+                    f"  ⚠️ Ep {ep_num}: targeted line-fix failed, "
                     "falling back to full-file fix."
                 )
                 fixed_lines = self._ask_gemini_to_fix(
@@ -541,7 +585,7 @@ class Manim_Engine:
                     # Gemini unavailable — try rendering with auto-fixed code anyway
                     # (better than failing immediately on a rate limit)
                     logger.warning(
-                        f"Ep {ep_num}: Gemini unavailable (rate limit?). "
+                        f"  ⚠️ Ep {ep_num}: Gemini unavailable (rate limit?). "
                         "Attempting render with auto-fixed code."
                     )
                     current_data["manim_code_lines"] = val.fixed_code.splitlines()
@@ -557,6 +601,7 @@ class Manim_Engine:
             filepath, code_string = self._write_scene_file(current_data, filename)
             is_safe, safety_msg = self._validate_code(code_string)
             if not is_safe:
+                logger.error(f"🔒 Security validation failed: {safety_msg}")
                 if os.path.exists(filepath):
                     os.remove(filepath)
                 if attempt > MAX_RETRIES:
@@ -577,11 +622,12 @@ class Manim_Engine:
             # ── Step 2: Render ───────────────────────────────────────────────
             success, render_output = self._run_manim(filepath)
             if success:
-                logger.info(f"Episode {ep_num} rendered OK on attempt {attempt}.")
+                logger.info(f"✅ Episode {ep_num} rendered OK on attempt {attempt}.")
                 mp4_path = self._resolve_rendered_mp4_path(filepath)
 
                 upload_doc = None
                 if uid and os.path.exists(mp4_path):
+                    logger.info(f"📤 Uploading video to Firebase for episode {ep_num}...")
                     upload_doc = upload_episode_video(
                         mp4_path,
                         uid=uid,
@@ -591,16 +637,23 @@ class Manim_Engine:
                     )
                     if upload_doc is None:
                         logger.warning(
-                            f"Episode {ep_num}: render succeeded but Firestore/"
+                            f"⚠️ Episode {ep_num}: render succeeded but Firestore/"
                             "Storage upload was skipped or failed (non-fatal — "
-                            "video still exists locally at %s)", mp4_path,
+                            f"video still exists locally at {mp4_path})"
                         )
+                    else:
+                        logger.info(f"✅ Episode {ep_num} uploaded successfully!")
+                        logger.info(f"   Video URL: {upload_doc.get('video_url')}")
+                        logger.info(f"   Document ID: {upload_doc.get('doc_id')}")
                 elif uid and not os.path.exists(mp4_path):
                     logger.warning(
-                        f"Episode {ep_num}: render reported success but expected "
+                        f"⚠️ Episode {ep_num}: render reported success but expected "
                         f"mp4 not found at {mp4_path} — skipping upload."
                     )
+                elif not uid:
+                    logger.info(f"ℹ️ No uid provided, skipping Firebase upload for episode {ep_num}")
 
+                logger.info(f"✅ Episode {ep_num} complete!")
                 return {
                     "status": "success",
                     "filepath": filepath,
@@ -611,7 +664,7 @@ class Manim_Engine:
                 }
 
             logger.warning(
-                f"Episode {ep_num} attempt {attempt} render failed:\n"
+                f"❌ Episode {ep_num} attempt {attempt} render failed:\n"
                 + render_output[:400]
             )
             if attempt > MAX_RETRIES:
@@ -622,10 +675,11 @@ class Manim_Engine:
                 error_message=render_output,
             )
             if fixed_lines is None:
-                logger.warning(f"Ep {ep_num}: Gemini unavailable on render error. Stopping.")
+                logger.warning(f"⚠️ Ep {ep_num}: Gemini unavailable on render error. Stopping.")
                 break
             current_data["manim_code_lines"] = fixed_lines
 
+        logger.error(f"❌ Episode {ep_num} failed after {min(attempt, MAX_RETRIES + 1)} attempts")
         return {
             "status": "error",
             "message": render_output,
@@ -633,17 +687,37 @@ class Manim_Engine:
         }
 
     def render_all_episodes(self, lesson_json: dict, *, uid: str | None = None, lesson_id: str | None = None) -> list[dict]:
+        episodes = lesson_json.get("episodes", [])
+        total = len(episodes)
+        
+        logger.info(f"🎬 ===== RENDERING ALL {total} EPISODES =====")
+        logger.info(f"   uid={uid}, lesson_id={lesson_id}")
+        
         results = []
-        for episode in lesson_json.get("episodes", []):
+        for i, episode in enumerate(episodes, 1):
+            logger.info(f"📹 Processing episode {i}/{total}")
             result = self.render_episode(episode, uid=uid, lesson_id=lesson_id)
             result["episode_number"] = episode.get("episode_number")
             results.append(result)
+            
+            # Log summary after each episode
+            status = result.get("status", "unknown")
+            logger.info(f"📊 Episode {i} status: {status}")
+            if status == "success":
+                logger.info(f"   Video URL: {result.get('video_url', 'N/A')}")
+            else:
+                logger.warning(f"   Error: {result.get('message', 'Unknown error')[:100]}")
+        
+        # Summary of all episodes
+        success_count = sum(1 for r in results if r.get("status") == "success")
+        logger.info(f"🏁 ===== RENDER COMPLETE: {success_count}/{total} episodes successful =====")
+        
         return results
 
     def count_questions_first(self, page_content: str) -> int:
         try:
             response = self.gemini_client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.5-flash",
                 contents=COUNT_PROMPT + "\n\nเนื้อหา:\n" + page_content,
                 config=types.GenerateContentConfig(temperature=0.1),
             )
@@ -652,8 +726,8 @@ class Manim_Engine:
             raw = re.sub(r"\s*```$", "", raw)
             data = json.loads(raw)
             count = data.get("question_count", 1)
-            logger.info(f"Pre-scan: {count} question(s): {data.get('question_titles', [])}")
+            logger.info(f"📊 Pre-scan: {count} question(s): {data.get('question_titles', [])}")
             return count
         except Exception as e:
-            logger.warning(f"Question count pre-scan failed: {e} — defaulting to 1")
+            logger.warning(f"⚠️ Question count pre-scan failed: {e} — defaulting to 1")
             return 1

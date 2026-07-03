@@ -1,5 +1,19 @@
-import { createUserWithEmailAndPassword, GoogleAuthProvider, sendEmailVerification, sendPasswordResetEmail, signInWithPopup, updatePassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
+// firebase/auth.js
+import { 
+  createUserWithEmailAndPassword, 
+  GoogleAuthProvider, 
+  sendEmailVerification, 
+  sendPasswordResetEmail, 
+  signInWithPopup, 
+  updatePassword, 
+  signInWithEmailAndPassword, 
+  signOut, 
+  onAuthStateChanged 
+} from "firebase/auth";
 import { auth } from "./firebaseConfig";
+
+// Export auth for use in other files
+export { auth };
 
 export const doCreateUserWithEmailAndPassword = async(email, password)=>{
     return createUserWithEmailAndPassword(auth, email, password)
@@ -23,4 +37,10 @@ export const doSignInWithEmailAndPassword = (email, password) => {
 
 export const doOnAuthStateChanged = (callback) => {
     return onAuthStateChanged(auth, callback);
+};
+
+// Google Sign In (optional)
+export const doSignInWithGoogle = async () => {
+  const provider = new GoogleAuthProvider();
+  return signInWithPopup(auth, provider);
 };

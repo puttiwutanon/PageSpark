@@ -42,6 +42,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Enhanced logging configuration
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 client = genai.Client()
 engine = Manim_Engine(output_dir="renders")
 
@@ -92,7 +99,7 @@ async def generate_quiz(request: QuizRequest):
         """
 
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.5-flash',
             contents=user_prompt,
             config=types.GenerateContentConfig(
                 system_instruction=QUIZ_GENERATION_SYSTEM_INSTRUCTION,
@@ -135,7 +142,7 @@ async def ingest_and_summarize(file: UploadFile = File(...)):
         gemini_file = client.files.upload(file=temp_path)
 
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.5-flash',
             contents=gemini_file,
             config=types.GenerateContentConfig(
                 system_instruction=LESSON_SUMMARY_SYSTEM_INSTRUCTION,
@@ -174,6 +181,13 @@ async def generate_video(
     Full pipeline: upload page → count questions → generate lesson JSON
     → enforce episode count → render all episodes → return video paths.
     """
+    logger.info("=" * 60)
+    logger.info("🎬 /api/generate-video called")
+    logger.info(f"   file: {file.filename}")
+    logger.info(f"   uid: {uid}")
+    logger.info(f"   lesson_id: {lesson_id}")
+    logger.info("=" * 60)
+    
     temp_path = ""
     gemini_file = None
 
@@ -183,12 +197,14 @@ async def generate_video(
             content = await file.read()
             temp_file.write(content)
             temp_path = temp_file.name
+        logger.info(f"📁 Saved uploaded file to: {temp_path}")
 
         # ── Step 1: Pre-scan to count questions ─────────────────────────────
+        logger.info("🔍 Step 1: Pre-scanning for question count...")
         gemini_file_for_count = client.files.upload(file=temp_path)
         try:
             count_response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.5-flash',
                 contents=[
                     gemini_file_for_count,
                     "นับจำนวนโจทย์ฟิสิกส์ในหน้านี้ "
@@ -203,18 +219,20 @@ async def generate_video(
             count_data = json.loads(raw_count)
             expected_count = count_data.get("question_count", 1)
             question_titles = count_data.get("question_titles", [])
-            logger.info(f"Pre-scan found {expected_count} question(s): {question_titles}")
+            logger.info(f"✅ Pre-scan found {expected_count} question(s): {question_titles}")
         except Exception as e:
-            logger.warning(f"Pre-scan failed ({e}), defaulting to 1 episode")
+            logger.warning(f"⚠️ Pre-scan failed ({e}), defaulting to 1 episode")
             expected_count = 1
             question_titles = []
         finally:
             try:
                 client.files.delete(name=gemini_file_for_count.name)
+                logger.debug("🗑️ Deleted temporary Gemini file for count")
             except Exception:
                 pass
 
         # ── Step 2: Generate lesson JSON (all episodes) ─────────────────────
+        logger.info("📝 Step 2: Generating lesson JSON...")
         dynamic_instruction = LESSON_SUMMARY_SYSTEM_INSTRUCTION + f"""
 
 ══════════════════════════════════════════════════
@@ -226,8 +244,9 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
 """
 
         gemini_file = client.files.upload(file=temp_path)
+        logger.info("⏳ Waiting for Gemini to generate lesson content...")
         gen_response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.5-flash',
             contents=gemini_file,
             config=types.GenerateContentConfig(
                 system_instruction=dynamic_instruction,
@@ -242,11 +261,15 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
 
         try:
             lesson_json = json.loads(raw_json)
-        except json.JSONDecodeError:
+            logger.info(f"✅ Generated JSON with {len(lesson_json.get('episodes', []))} episodes")
+        except json.JSONDecodeError as e:
+            logger.warning(f"⚠️ JSON decode error, attempting fix: {e}")
             fixed_raw = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw_json)
             lesson_json = json.loads(fixed_raw)
+            logger.info("✅ Fixed JSON successfully")
 
         # ── Step 3: Enforce episode count ────────────────────────────────────
+        logger.info(f"📊 Step 3: Enforcing episode count (expected={expected_count})...")
         lesson_json = engine.enforce_episode_count(
             lesson_json=lesson_json,
             expected_count=expected_count,
@@ -255,14 +278,30 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
 
         is_valid, validation_msg = validate_episode_count(lesson_json, expected_min=expected_count)
         if not is_valid:
-            logger.warning(f"Episode count validation: {validation_msg}")
+            logger.warning(f"⚠️ Episode count validation: {validation_msg}")
+        else:
+            logger.info("✅ Episode count validation passed")
 
         print("\n" + "="*20 + " GENERATED MANIM JSON " + "="*20, flush=True)
         print(json.dumps(lesson_json, indent=2, ensure_ascii=False), flush=True)
         print("="*62 + "\n", flush=True)
 
         # ── Step 4: Render all episodes ──────────────────────────────────────
+        logger.info(f"🎬 Step 4: Rendering {len(lesson_json.get('episodes', []))} episodes...")
         render_results = engine.render_all_episodes(lesson_json, uid=uid, lesson_id=lesson_id)
+
+        # Log final results
+        logger.info("=" * 60)
+        logger.info("📊 RENDER RESULTS SUMMARY:")
+        for result in render_results:
+            ep_num = result.get("episode_number", "?")
+            status = result.get("status", "unknown")
+            logger.info(f"   Episode {ep_num}: {status}")
+            if status == "success":
+                logger.info(f"      Video URL: {result.get('video_url', 'N/A')}")
+            else:
+                logger.info(f"      Error: {result.get('message', 'Unknown')[:100]}")
+        logger.info("=" * 60)
 
         return {
             "status": "success",
@@ -274,14 +313,16 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
         }
 
     except Exception as e:
-        logger.error(f"generate_video error: {e}", exc_info=True)
+        logger.error(f"❌ generate_video error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
+            logger.debug(f"🗑️ Deleted temp file: {temp_path}")
         if gemini_file:
             try:
                 client.files.delete(name=gemini_file.name)
+                logger.debug("🗑️ Deleted Gemini file")
             except Exception:
                 pass
