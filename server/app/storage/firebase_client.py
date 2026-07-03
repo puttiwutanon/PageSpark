@@ -1,15 +1,14 @@
 """
 Single shared initialization of firebase_admin for the whole app.
-Every other module should import `db` and `bucket` from here instead
-of calling firebase_admin.initialize_app() themselves -- Firebase
-throws if you initialize the same app twice in one process.
+Handles Authentication, Firestore, and Cloudinary integration.
 """
-
 import os
 import logging
 import firebase_admin
-from firebase_admin import credentials, firestore, storage
+from firebase_admin import credentials, firestore, auth
+from dotenv import load_dotenv
 
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -35,6 +34,7 @@ if service_account_path is None:
         import json
         cred_dict = json.loads(cred_json)
         cred = credentials.Certificate(cred_dict)
+        logger.info("✅ Firebase initialized using environment variable credentials")
     else:
         raise FileNotFoundError(
             "serviceAccountKey.json not found in any expected location. "
@@ -42,15 +42,34 @@ if service_account_path is None:
         )
 else:
     cred = credentials.Certificate(service_account_path)
+    logger.info(f"✅ Firebase initialized using service account: {service_account_path}")
 
-# Get bucket name from environment or use default
-BUCKET_NAME = os.environ.get("FIREBASE_STORAGE_BUCKET", "pagespark-39612.appspot.com")
+# Initialize Firebase
+firebase_admin.initialize_app(cred)
 
-firebase_admin.initialize_app(cred, {
-    'storageBucket': BUCKET_NAME
-})
-
+# Export Firestore client
 db = firestore.client()
-bucket = storage.bucket()
 
-logger.info(f"Firebase initialized with bucket: {BUCKET_NAME}")
+logger.info("✅ Firebase Firestore ready!")
+
+# Helper functions for Firestore operations
+def get_user(uid: str) -> dict | None:
+    """Get user data from Firestore."""
+    try:
+        doc = db.collection("users").document(uid).get()
+        if doc.exists:
+            return {"id": doc.id, **doc.to_dict()}
+        return None
+    except Exception as e:
+        logger.error(f"Error getting user: {e}")
+        return None
+
+def create_user(uid: str, data: dict) -> dict:
+    """Create or update user in Firestore."""
+    try:
+        doc_ref = db.collection("users").document(uid)
+        doc_ref.set(data, merge=True)
+        return {"id": uid, **data}
+    except Exception as e:
+        logger.error(f"Error creating user: {e}")
+        return None

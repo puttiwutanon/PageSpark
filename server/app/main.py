@@ -1,46 +1,26 @@
 """
 server/app/main.py
-
-Changes vs original:
-  - FIX #3: count_questions_first() is now called BEFORE generation,
-    and enforce_episode_count() is called AFTER to catch the "only 1 episode"
-    bug where Gemini stops early even when the page has 3 questions.
-  - FIX: /api/ingest was missing its return statement — added back.
 """
-
 import os
 import tempfile
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
+from firebase_admin import credentials, firestore, auth
  
 from app.core.prompts import LESSON_SUMMARY_SYSTEM_INSTRUCTION, QUIZ_GENERATION_SYSTEM_INSTRUCTION
 from app.services.manim_engine import Manim_Engine
 from app.services.code_validator import validate_episode_count
+from app.api.videos import router as videos_router
 
 import re
 import json
 import logging
-
-logger = logging.getLogger(__name__)
-
-current_dir = os.path.dirname(os.path.abspath(__file__))
-server_dir = os.path.dirname(current_dir)
-load_dotenv(os.path.join(server_dir, ".env"))
-
-app = FastAPI(title="PageSpark API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], 
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Enhanced logging configuration
 logging.basicConfig(
@@ -49,9 +29,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+server_dir = os.path.dirname(current_dir)
+load_dotenv(os.path.join(server_dir, ".env"))
+
+app = FastAPI(title="PageSpark API")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include video router
+app.include_router(videos_router)
+
+# Initialize clients
 client = genai.Client()
 engine = Manim_Engine(output_dir="renders")
 
+# Topic mapper (keep your existing one)
 TOPIC_MAPPER = {
     'mechanics_1': 'กลศาสตร์ 1 (การเคลื่อนที่แนวตรง, นิวตัน, สมดุลกล)',
     'mechanics_2': 'กลศาสตร์ 2 (งานและพลังงาน, โมเมนตัม, การเคลื่อนที่แนวโค้ง)',
@@ -62,7 +62,7 @@ TOPIC_MAPPER = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pydantic Schemas
+# Pydantic Schemas (keep your existing ones)
 # ─────────────────────────────────────────────────────────────────────────────
 class QuizRequest(BaseModel):
     topics: List[str]
@@ -77,12 +77,13 @@ class QuizItemSchema(BaseModel):
 class QuizResponseSchema(BaseModel):
     quizzes: List[QuizItemSchema]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Endpoints (keep your existing ones)
+# ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/api/generate-quiz", response_model=QuizResponseSchema)
 async def generate_quiz(request: QuizRequest):
-    """
-    Endpoint to generate custom academic physics quiz questions using structured outputs.
-    """
+    """Generate custom academic physics quiz questions."""
     try:
         translated_topics = [TOPIC_MAPPER.get(topic, topic) for topic in request.topics]
         topics_instructions = "\n".join([
@@ -124,11 +125,32 @@ async def generate_quiz(request: QuizRequest):
 
 
 @app.post("/api/ingest")
-async def ingest_and_summarize(file: UploadFile = File(...)):
+async def ingest_and_summarize(
+    file: UploadFile = File(...),
+    render: bool = Query(False, description="If true, also render videos and upload to Cloudinary"),
+    uid: str = Query("anonymous", description="User ID for video uploads"),
+    lesson_id: Optional[str] = Query(None, description="Lesson ID for grouping videos"),
+):
     """
     Ingest a textbook page image/PDF and return a lesson summary JSON.
-    This is the SUMMARY-only endpoint (no video rendering).
+    
+    By default, this is SUMMARY-ONLY (no video rendering).
+    
+    To also render videos and upload to Cloudinary, pass ?render=true:
+    POST /api/ingest?render=true&uid=test_user&lesson_id=lesson_001
     """
+    logger.info("=" * 60)
+    logger.info(f"📥 /api/ingest called")
+    logger.info(f"   file: {file.filename}")
+    logger.info(f"   render: {render}")
+    logger.info(f"   uid: {uid}")
+    logger.info(f"   lesson_id: {lesson_id}")
+    
+    if render:
+        logger.info("🔄 render=True detected — delegating to full video generation pipeline...")
+        return await generate_video(file=file, uid=uid, lesson_id=lesson_id)
+    
+    # Summary-only mode
     temp_path = ""
     gemini_file = None
 
@@ -154,11 +176,11 @@ async def ingest_and_summarize(file: UploadFile = File(...)):
         print(response.text, flush=True)
         print("="*56 + "\n", flush=True)
 
-        # FIX: return statement was missing — the endpoint was returning None (HTTP 200 with null body)
         return {
             "status": "success",
             "filename": file.filename,
             "summary": response.text,
+            "note": "Summary only. To render videos, use /api/generate-video or add ?render=true"
         }
 
     except Exception as e:
@@ -179,7 +201,7 @@ async def generate_video(
 ):
     """
     Full pipeline: upload page → count questions → generate lesson JSON
-    → enforce episode count → render all episodes → return video paths.
+    → enforce episode count → render all episodes → upload to Cloudinary.
     """
     logger.info("=" * 60)
     logger.info("🎬 /api/generate-video called")
@@ -227,11 +249,10 @@ async def generate_video(
         finally:
             try:
                 client.files.delete(name=gemini_file_for_count.name)
-                logger.debug("🗑️ Deleted temporary Gemini file for count")
             except Exception:
                 pass
 
-        # ── Step 2: Generate lesson JSON (all episodes) ─────────────────────
+        # ── Step 2: Generate lesson JSON ─────────────────────────────────────
         logger.info("📝 Step 2: Generating lesson JSON...")
         dynamic_instruction = LESSON_SUMMARY_SYSTEM_INSTRUCTION + f"""
 
@@ -293,14 +314,17 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
         # Log final results
         logger.info("=" * 60)
         logger.info("📊 RENDER RESULTS SUMMARY:")
+        success_count = 0
         for result in render_results:
             ep_num = result.get("episode_number", "?")
             status = result.get("status", "unknown")
             logger.info(f"   Episode {ep_num}: {status}")
             if status == "success":
+                success_count += 1
                 logger.info(f"      Video URL: {result.get('video_url', 'N/A')}")
             else:
                 logger.info(f"      Error: {result.get('message', 'Unknown')[:100]}")
+        logger.info(f"📊 Total: {success_count}/{len(render_results)} episodes successful")
         logger.info("=" * 60)
 
         return {
@@ -319,10 +343,29 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
     finally:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
-            logger.debug(f"🗑️ Deleted temp file: {temp_path}")
         if gemini_file:
             try:
                 client.files.delete(name=gemini_file.name)
-                logger.debug("🗑️ Deleted Gemini file")
             except Exception:
                 pass
+
+
+# ── Health Check and Firebase Test ─────────────────────────────────────────────
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint."""
+    return {"status": "healthy", "service": "PageSpark API"}
+
+
+@app.get("/api/test-firebase")
+async def test_firebase():
+    """Test if Firebase is properly configured."""
+    try:
+        from app.storage.firebase_client import db
+        # Test Firestore
+        test_ref = db.collection("test").document("test")
+        test_ref.set({"test": "success", "timestamp": firestore.SERVER_TIMESTAMP})
+        test_ref.delete()
+        return {"status": "Firebase connected successfully!"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}

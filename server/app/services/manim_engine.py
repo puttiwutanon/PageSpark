@@ -10,7 +10,7 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 from app.services.code_validator import preprocess_code
-from app.storage.video_storage import upload_episode_video
+from app.storage.cloudinary_storage import upload_episode_video
 from pydantic import BaseModel
 
 load_dotenv()
@@ -22,7 +22,63 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 2
+MAX_RETRIES = 2  # Keep at 2 to avoid API exhaustion
+
+
+def _quality_check(self, code_lines: list[str]) -> tuple[bool, list[str]]:
+    """
+    Run a quick quality check on the generated code.
+    Returns (is_acceptable, issues_list)
+    This runs BEFORE any API calls to save quota.
+    """
+    issues = []
+    
+    # Check for common issues
+    code_str = "\n".join(code_lines)
+    
+    # Check for correct scaling
+    if 'scale_to_fit_width' not in code_str:
+        issues.append("Missing scale_to_fit_width")
+    
+    # Check for correct font sizes
+    import re
+    font_sizes = re.findall(r'font_size\s*=\s*(\d+)', code_str)
+    for size in font_sizes:
+        if int(size) > 28:
+            issues.append(f"font_size={size} exceeds 28")
+    
+    # Check for math errors
+    if '\\\\equiv' in code_str:
+        issues.append("Using \\equiv instead of =")
+    
+    if 'sqrt{200^2 + 200^2}' in code_str and '200\\\\sqrt{2}' not in code_str:
+        issues.append("Incorrect sqrt(200²+200²) calculation")
+    
+    # Check for Thai in MathTex
+    thai_pattern = re.compile(r'MathTex\([^)]*[\u0E00-\u0E7F]')
+    if thai_pattern.search(code_str):
+        issues.append("Thai characters found in MathTex()")
+    
+    # Check for LaTeX in Text
+    latex_pattern = re.compile(r'Text\([^)]*\\\\(?:frac|sqrt|lambda|phi|theta)')
+    if latex_pattern.search(code_str):
+        issues.append("LaTeX commands found in Text()")
+    
+    # Check for VGroup without scaling in bottom zone
+    if 'bottom_center' in code_str:
+        vgroup_pattern = re.compile(r'(\w+)\s*=\s*VGroup\(')
+        vgroups = vgroup_pattern.findall(code_str)
+        for vg in vgroups:
+            if f'{vg}.scale_to_fit_width' not in code_str and f'{vg}.scale_to_fit_height' not in code_str:
+                if 'axes' not in vg.lower():  # Axes don't need scaling
+                    issues.append(f"VGroup '{vg}' missing scaling")
+    
+    # Check if bottom zone has enough content (at least 2 steps)
+    step_count = len(re.findall(r'step\d+_title', code_str))
+    if step_count < 2:
+        issues.append(f"Only {step_count} step(s) found - should have at least 2")
+    
+    return len(issues) == 0, issues
 
 
 def smart_json_sanitize(raw: str) -> str:
@@ -226,15 +282,26 @@ class Manim_Engine:
 
     def _resolve_rendered_mp4_path(self, scene_filepath: str) -> str:
         """
-        manim -ql writes to:
-          {media_dir}/videos/{scene_file_stem}/480p15/{SceneClassName}.mp4
-        `-ql` = "quality low" = 480p15. If you ever change the manim quality
-        flag in _run_manim, update "480p15" here to match.
+        manim renders to 1920p60 quality.
         """
         stem = os.path.splitext(os.path.basename(scene_filepath))[0]
-        mp4_path = os.path.join(self.output_dir, "videos", stem, "480p15", "PhysicsScene.mp4")
-        logger.debug(f"📹 Expected MP4 path: {mp4_path}")
-        return mp4_path
+        
+        # Only 1920p60
+        path = os.path.join(self.output_dir, "videos", stem, "1920p60", "PhysicsScene.mp4")
+        
+        # If not found, try to find any PhysicsScene.mp4
+        if not os.path.exists(path):
+            import glob
+            pattern = os.path.join(self.output_dir, "videos", "**", "PhysicsScene.mp4")
+            matches = glob.glob(pattern, recursive=True)
+            if matches:
+                matches.sort(key=os.path.getmtime, reverse=True)
+                path = matches[0]
+                logger.info(f"✅ Found video at: {path}")
+            else:
+                logger.warning(f"⚠️ No video found at expected path: {path}")
+        
+        return path
 
     def _run_manim(self, filepath: str) -> tuple[bool, str]:
         cmd = ["manim", "-ql", filepath, "PhysicsScene", "--media_dir", self.output_dir]
@@ -596,6 +663,79 @@ class Manim_Engine:
 
             else:
                 current_data["manim_code_lines"] = val.fixed_code.splitlines()
+
+            # ── STEP 2.5: Quality Check (BEFORE rendering to save time) ────
+            is_quality_ok, quality_issues = _quality_check(self, current_data["manim_code_lines"])
+            
+            if not is_quality_ok:
+                logger.warning(f"  ⚠️ Ep {ep_num} quality check failed: {len(quality_issues)} issues")
+                for issue in quality_issues:
+                    logger.warning(f"    • {issue}")
+                
+                if attempt > MAX_RETRIES:
+                    logger.error(f"❌ Episode {ep_num}: Quality issues not resolved after {MAX_RETRIES} retries")
+                    return {
+                        "status": "error",
+                        "message": f"Quality check failed after {MAX_RETRIES} retries:\n" + "\n".join(quality_issues),
+                        "attempts": attempt,
+                    }
+                
+                # Try to fix quality issues with Gemini (line fix first)
+                logger.info(f"  🔧 Attempting to fix quality issues for episode {ep_num}...")
+                
+                # Convert quality issues to Violation objects for the line fixer
+                quality_violations = []
+                for i, issue in enumerate(quality_issues):
+                    # Find the line number where this issue occurs
+                    line_num = 1
+                    for line_idx, line in enumerate(current_data["manim_code_lines"]):
+                        if 'scale_to_fit_width' in line and 'Missing scale_to_fit_width' in issue:
+                            line_num = line_idx + 1
+                            break
+                        elif 'font_size=' in issue:
+                            if 'font_size' in line:
+                                line_num = line_idx + 1
+                                break
+                        elif 'MathTex' in line and 'Thai' in issue:
+                            line_num = line_idx + 1
+                            break
+                    else:
+                        line_num = len(current_data["manim_code_lines"])
+                    
+                    # Create a Violation-like object
+                    class QualityViolation:
+                        def __init__(self, line, rule, description):
+                            self.line = line
+                            self.rule = rule
+                            self.description = description
+                            self.snippet = current_data["manim_code_lines"][line-1] if line <= len(current_data["manim_code_lines"]) else ""
+                    
+                    quality_violations.append(QualityViolation(line_num, f"QUALITY_{i}", issue))
+                
+                # Try line fix first (cheaper API call)
+                fixed_code = self._ask_gemini_to_fix_lines(
+                    code="\n".join(current_data["manim_code_lines"]),
+                    violations=quality_violations,
+                )
+                
+                if fixed_code is not None:
+                    current_data["manim_code_lines"] = fixed_code.splitlines()
+                    logger.info(f"  ✅ Quality issues sent to Gemini for line fix")
+                    continue  # re-validate and re-check quality
+                else:
+                    # If line fix fails, try full fix
+                    logger.warning(f"  ⚠️ Line fix failed, trying full-file fix for quality issues")
+                    fixed_lines = self._ask_gemini_to_fix(
+                        original_code="\n".join(current_data["manim_code_lines"]),
+                        error_message=f"Quality check failed:\n" + "\n".join(quality_issues),
+                    )
+                    if fixed_lines is not None:
+                        current_data["manim_code_lines"] = fixed_lines
+                        logger.info(f"  ✅ Quality issues sent to Gemini for full fix")
+                        continue
+                    else:
+                        logger.warning(f"  ⚠️ Gemini unavailable for quality fix, attempting render anyway")
+                        # Fall through to render
 
             # ── Step 1: Security check ───────────────────────────────────────
             filepath, code_string = self._write_scene_file(current_data, filename)

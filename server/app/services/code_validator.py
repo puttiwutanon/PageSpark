@@ -10,14 +10,6 @@ are only needed for structural rewrites, not trivial pattern fixes.
 Two-phase approach:
   Phase 1 — Auto-fix: patterns we can correct safely without LLM help
   Phase 2 — Violation report: things that need LLM rewrite
-
-NEW in v2: Massively expanded Phase 1 to auto-fix the most common
-violation patterns that Gemini keeps generating:
-  - VGroup(*[...list comprehension...]) → expanded VGroup(Text(...), Text(...))
-  - Text('...\\lambda...') → VGroup(Text('...'), MathTex(r'\\lambda'))
-  - step_title VGroup with .arrange(RIGHT) on long Thai + symbol → .arrange(DOWN)
-  - Trailing backslash issues in MathTex strings
-  - Thai in \\mathrm{} → extracted to Text()
 """
 
 import re
@@ -128,38 +120,30 @@ def _fix_single_backslash_lambda(code: str, fixes: list[str]) -> str:
     return pattern.sub(replacer, code)
 
 
-# ── NEW: Fix VGroup(*[Text(...) for line in [...]]) ─────────────────────────
 def _fix_vgroup_list_comprehension(code: str, fixes: list[str]) -> str:
     """
     Auto-fix VGroup(*[Text(line, ...) for line in ['a', 'b', 'c']]) →
     VGroup(Text('a', ...), Text('b', ...), Text('c', ...))
-    
-    This handles the most common pattern Gemini generates.
     """
-    # Pattern: VGroup(*[Text(var, ...kwargs...) for var in ['str1', 'str2', ...]])
     pattern = re.compile(
-        r'VGroup\s*\(\s*\*\s*\[\s*'           # VGroup(*[
-        r'(\w+)\s*\(([\w_]+)\s*,\s*([^]]+?)\)'  # Text(var, ...kwargs...)
-        r'\s*for\s+(\w+)\s+in\s+\[([^\]]+)\]'  # for var in [...]
-        r'\s*\]\s*\)',                           # ])
+        r'VGroup\s*\(\s*\*\s*\[\s*'
+        r'(\w+)\s*\(([\w_]+)\s*,\s*([^]]+?)\)'
+        r'\s*for\s+(\w+)\s+in\s+\[([^\]]+)\]'
+        r'\s*\]\s*\)',
         re.DOTALL
     )
     
     def replacer(m):
-        ctor = m.group(1)          # e.g. "Text"
-        # m.group(2) is var name in comprehension (unused since we inline)
-        kwargs_str = m.group(3).strip()  # e.g. font='TH Sarabun New', font_size=26
-        # m.group(4) is the loop variable name
-        items_str = m.group(5)     # e.g. 'line1', 'line2', 'line3'
+        ctor = m.group(1)
+        kwargs_str = m.group(3).strip()
+        items_str = m.group(5)
         
-        # Extract string literals from the list
         items = re.findall(r"'([^']*)'|\"([^\"]*)\"", items_str)
         strings = [a or b for a, b in items]
         
         if not strings:
-            return m.group(0)  # Can't parse, leave as-is
+            return m.group(0)
         
-        # Build expanded VGroup
         parts = [f"{ctor}('{s}', {kwargs_str})" for s in strings]
         result = 'VGroup(\n' + ',\n'.join(f'            {p}' for p in parts) + '\n        )'
         fixes.append(
@@ -170,9 +154,6 @@ def _fix_vgroup_list_comprehension(code: str, fixes: list[str]) -> str:
     
     new_code = pattern.sub(replacer, code)
     
-    # Also handle: variable = [...]; VGroup(*[Text(line, ...) for line in variable])
-    # This is harder to detect, do a simpler pass for the common case
-    # where problem_lines or similar variable is defined then used
     var_list_pattern = re.compile(
         r'(\w+)\s*=\s*\[\s*\n?((?:\s*\'[^\']*\',?\s*\n?)+)\s*\]',
         re.DOTALL
@@ -186,7 +167,6 @@ def _fix_vgroup_list_comprehension(code: str, fixes: list[str]) -> str:
         re.DOTALL
     )
     
-    # Find all list variable definitions
     list_vars = {}
     for vm in var_list_pattern.finditer(new_code):
         var_name = vm.group(1)
@@ -195,16 +175,13 @@ def _fix_vgroup_list_comprehension(code: str, fixes: list[str]) -> str:
         if strings:
             list_vars[var_name] = strings
     
-    # Now replace VGroup(*[Text(line, ...) for line in list_var])
     def comprehension_replacer(m):
         ctor = m.group(1)
-        # m.group(2) is loop var name
         kwargs_str = m.group(3).strip()
-        # m.group(4) is loop var
         list_name = m.group(5)
         
         if list_name not in list_vars:
-            return m.group(0)  # Can't resolve, leave
+            return m.group(0)
         
         strings = list_vars[list_name]
         parts = [f"{ctor}('{s}', {kwargs_str})" for s in strings]
@@ -219,28 +196,10 @@ def _fix_vgroup_list_comprehension(code: str, fixes: list[str]) -> str:
     return new_code
 
 
-# ── NEW: Fix LaTeX symbols in Text() calls ───────────────────────────────────
 def _fix_latex_in_text_calls(code: str, fixes: list[str]) -> str:
     """
-    Auto-fix Text('...\\lambda...') patterns.
-    
-    Strategy:
-    - If the Text contains a LaTeX symbol like \\lambda, \\phi, etc. embedded
-      in an otherwise Thai string, we replace the LaTeX symbol with its
-      Thai/readable equivalent or split into VGroup.
-    
-    For step titles like: Text('หาความยาวคลื่น (\\lambda)', ...)
-    → Split into VGroup:
-      VGroup(
-        Text('หาความยาวคลื่น (', ...),
-        MathTex(r'\\lambda', ...),
-        Text(')', ...),
-      ).arrange(RIGHT, buff=0.05)
-    
-    Simpler approach: replace \\lambda etc. with unicode or readable text
-    inside Text() since the symbol will just be decorative context in a title.
+    Auto-fix Text('...\\lambda...') patterns by replacing with unicode.
     """
-    # Map LaTeX symbols to Unicode/readable equivalents for use in Text()
     latex_to_unicode = {
         r'\\lambda': 'λ',
         r'\\Lambda': 'Λ',
@@ -269,9 +228,9 @@ def _fix_latex_in_text_calls(code: str, fixes: list[str]) -> str:
         r'\\eta': 'η',
         r'\\xi': 'ξ',
         r'\\zeta': 'ζ',
-        r'\\vec': '',      # remove \vec from text context
-        r'\\hat': '',      # remove \hat from text context
-        r'\\frac': '/',    # frac becomes /
+        r'\\vec': '',
+        r'\\hat': '',
+        r'\\frac': '/',
         r'\\cdot': '·',
         r'\\times': '×',
         r'\\pm': '±',
@@ -282,7 +241,7 @@ def _fix_latex_in_text_calls(code: str, fixes: list[str]) -> str:
         r'\\sqrt': '√',
         r'\\circ': '°',
         r'\\infty': '∞',
-        r'\\mathrm': '',   # \mathrm{x} → just leave x (handled below)
+        r'\\mathrm': '',
         r'\\mathbf': '',
     }
     
@@ -290,25 +249,19 @@ def _fix_latex_in_text_calls(code: str, fixes: list[str]) -> str:
     result_lines = []
     
     for line in lines:
-        # Only process lines with Text( that also have backslash sequences
         if 'Text(' in line and '\\\\' in line:
-            # Find all Text('...') calls on this line
-            # Pattern: Text('content', rest_of_args)
             text_pattern = re.compile(r"(Text\s*\(\s*')((?:[^'\\]|\\.)*)(')")
             
             def text_replacer(m):
-                prefix = m.group(1)   # Text('
-                content = m.group(2)  # the string content
-                suffix = m.group(3)   # closing '
+                prefix = m.group(1)
+                content = m.group(2)
+                suffix = m.group(3)
                 
                 original_content = content
                 modified = False
                 
-                # Replace LaTeX symbols with unicode in the content
                 for latex, uni in latex_to_unicode.items():
-                    # Match \\symbol or \\symbol{...}
                     if latex + '{' in content:
-                        # Handle \mathrm{x}, \mathbf{x} etc - just keep the content
                         brace_pat = re.compile(re.escape(latex) + r'\{([^}]*)\}')
                         content = brace_pat.sub(r'\1', content)
                         modified = True
@@ -316,7 +269,6 @@ def _fix_latex_in_text_calls(code: str, fixes: list[str]) -> str:
                         content = content.replace(latex, uni)
                         modified = True
                 
-                # Clean up leftover braces from removed commands
                 content = re.sub(r'\{([^}]*)\}', r'\1', content)
                 
                 if modified:
@@ -333,23 +285,13 @@ def _fix_latex_in_text_calls(code: str, fixes: list[str]) -> str:
     return '\n'.join(result_lines)
 
 
-# ── NEW: Fix Thai in \mathrm{} ────────────────────────────────────────────────
 def _fix_thai_in_mathrm(code: str, fixes: list[str]) -> str:
-    """
-    Auto-fix \\mathrm{ภาษาไทย} → just remove the \\mathrm{} wrapper
-    since Thai can't be in mathrm anyway. The content remains as bare text
-    which will cause issues, but at least it won't crash LaTeX immediately.
-    
-    For cases like: MathTex(r'\\mathrm{ก.\,} t = 5')
-    We can't easily split these deterministically, so we flag them but also
-    try to do a best-effort fix by stripping the Thai from mathrm.
-    """
+    """Auto-fix \\mathrm{ภาษาไทย} by removing Thai chars."""
     thai_range = re.compile(r'[\u0E00-\u0E7F]')
     mathrm_with_thai = re.compile(r'\\\\?mathrm\{([^}]*[\u0E00-\u0E7F][^}]*)\}')
     
     def replacer(m):
         content = m.group(1)
-        # Strip Thai characters, keep ASCII
         ascii_content = ''.join(c for c in content if ord(c) < 128)
         if ascii_content.strip():
             fixes.append(f"AUTO-FIX: \\mathrm{{{content[:20]}}} - removed Thai chars, kept ASCII")
@@ -361,29 +303,12 @@ def _fix_thai_in_mathrm(code: str, fixes: list[str]) -> str:
     return mathrm_with_thai.sub(replacer, code)
 
 
-# ── NEW: Fix step_title VGroup with LaTeX in Text ───────────────────────────
 def _fix_step_title_latex(code: str, fixes: list[str]) -> str:
-    """
-    Fix the very common Gemini pattern:
-    
-    step1_title = VGroup(
-        Text('ขั้นตอนที่ 1:', ...),
-        Text('หาความยาวคลื่น (\\lambda)', ...),   ← LaTeX in Text!
-    ).arrange(RIGHT, buff=0.15)
-    
-    → Replace the Text with LaTeX symbol with a version using unicode
-    (already handled by _fix_latex_in_text_calls, but this targets
-    the specific VGroup step_title pattern for better messaging)
-    """
-    # This is now handled by _fix_latex_in_text_calls above
-    # But add a specific fixer for the double-backslash pattern in step titles
-    # Pattern: Text('...สัญลักษณ์... (\\\\symbol)', ...)
-    
-    # Double-backslash variants in Text strings (these are the most common)
+    """Fix LaTeX symbols in Text() step titles."""
     double_bs_symbols = {
         r'(\\\\lambda)': 'λ',
         r'(\\\\phi)': 'φ',
-        r'(\\\\phi_': 'φ_',  # don't fully replace subscripts
+        r'(\\\\phi_': 'φ_',
         r'(\\\\theta)': 'θ',
         r'(\\\\alpha)': 'α',
         r'(\\\\beta)': 'β',
@@ -404,10 +329,8 @@ def _fix_step_title_latex(code: str, fixes: list[str]) -> str:
         if 'Text(' in line:
             for pattern, replacement in double_bs_symbols.items():
                 if '\\\\' in line and pattern.replace('(', '').replace(')', '') in line:
-                    # Find Text('...') strings and do replacement inside them
                     def make_replacer(rep):
                         def replacer(m):
-                            # m is from Text('...') match
                             inner = m.group(0)
                             pat = pattern.replace('(', r'\(').replace(')', r'\)')
                             new_inner = re.sub(pat, rep, inner)
@@ -435,10 +358,7 @@ def _fix_latex_escape_in_text(code: str, fixes: list[str]) -> str:
 
 
 def _fix_move_to_scalar(code: str, fixes: list[str]) -> str:
-    """
-    Auto-fix .move_to(scalar_var) → .move_to(np.array([0, scalar_var, 0]))
-    for common zone center variable names.
-    """
+    """Auto-fix .move_to(scalar_var) → .move_to(np.array([0, scalar_var, 0]))."""
     zone_vars = [
         'bottom_zone_center_y', 'middle_zone_center_y', 'top_zone_center_y',
         'bottom_zone_bottom', 'bottom_zone_top',
@@ -456,11 +376,7 @@ def _fix_move_to_scalar(code: str, fixes: list[str]) -> str:
 
 
 def _fix_axes_too_large(code: str, fixes: list[str]) -> str:
-    """
-    Clamp x_length/y_length on Axes(...) calls to the safe ceiling
-    (5.85 / 4.68) instead of escalating to a Gemini fix-call.
-    This mirrors the threshold used by _detect_axes_too_large.
-    """
+    """Clamp x_length/y_length on Axes(...) calls to safe limits."""
     def x_replacer(m):
         val = float(m.group(1))
         if val > 5.85:
@@ -481,13 +397,7 @@ def _fix_axes_too_large(code: str, fixes: list[str]) -> str:
 
 
 def _fix_font_size_too_large(code: str, fixes: list[str]) -> str:
-    """
-    Clamp font_size on Text()/MathTex() calls to 28 instead of
-    escalating to a Gemini fix-call. Only touches font_size args
-    that appear on the same line as Text(/MathTex( to avoid
-    accidentally clamping unrelated font_size usages (e.g. axis labels
-    which already have their own smaller defaults set by Gemini).
-    """
+    """Clamp font_size on Text()/MathTex() calls to 28."""
     pattern = re.compile(
         r'((?:Text|MathTex)\s*\([^)]*?font_size\s*=\s*)([0-9]+)'
     )
@@ -503,7 +413,7 @@ def _fix_font_size_too_large(code: str, fixes: list[str]) -> str:
 
 
 def _fix_missing_numpy_import(code: str, fixes: list[str]) -> str:
-    """Add import numpy as np if missing from first 5 lines."""
+    """Add import numpy as np if missing."""
     lines = code.splitlines()
     first_block = '\n'.join(lines[:10])
     if 'import numpy as np' not in first_block:
@@ -521,7 +431,7 @@ def _fix_showcreation(code: str, fixes: list[str]) -> str:
 
 
 def _fix_get_graph(code: str, fixes: list[str]) -> str:
-    """Auto-fix axes.get_graph() → axes.plot() (simple cases only)."""
+    """Auto-fix axes.get_graph() → axes.plot()."""
     pattern = re.compile(r'\.get_graph\s*\(')
     if pattern.search(code):
         fixes.append("AUTO-FIX: .get_graph() → .plot()")
@@ -530,19 +440,12 @@ def _fix_get_graph(code: str, fixes: list[str]) -> str:
 
 
 def _fix_double_quote_in_strings(code: str, fixes: list[str]) -> str:
-    """
-    Fix Text("...") using double quotes → Text('...')
-    Only in Text() and MathTex() calls, not in general code.
-    This handles the case where Gemini uses double quotes inside Python code.
-    """
-    # This is risky to do broadly - only fix obvious cases
-    # Pattern: Text("content") → Text('content')
-    # But only when there are no single quotes inside the content
+    """Fix Text("...") using double quotes → Text('...')."""
     pattern = re.compile(r'((?:Text|MathTex|Tex)\s*\()"([^"]*)"')
     
     def replacer(m):
         if "'" in m.group(2):
-            return m.group(0)  # Has single quotes inside, skip
+            return m.group(0)
         fixes.append(f"AUTO-FIX: Double-quoted string in {m.group(1)} → single quotes")
         return f"{m.group(1)}'{m.group(2)}'"
     
@@ -550,30 +453,17 @@ def _fix_double_quote_in_strings(code: str, fixes: list[str]) -> str:
 
 
 def _fix_arrange_right_long_thai(code: str, fixes: list[str]) -> str:
-    """
-    Auto-fix .arrange(RIGHT) on VGroups that contain long Thai Text objects.
-    Change to .arrange(DOWN, aligned_edge=LEFT) to prevent overflow.
-    
-    This handles patterns like:
-      step1_title = VGroup(
-          Text('ขั้นตอนที่ 1: หาความยาวคลื่น...', ...),  # long Thai
-          MathTex(r'\\lambda', ...)
-      ).arrange(RIGHT, buff=0.15)   ← THIS causes overflow
-    """
+    """Auto-fix .arrange(RIGHT) with long Thai Text to .arrange(DOWN)."""
     thai_long = re.compile(r'[\u0E00-\u0E7F]{15,}')
     
-    # Look for VGroup blocks ending with .arrange(RIGHT, ...)
-    # This is a multi-line pattern
     lines = code.splitlines()
-    result_lines = list(lines)  # copy
+    result_lines = list(lines)
     
     i = 0
     while i < len(lines):
         line = lines[i]
         
-        # Check if this line has .arrange(RIGHT
         if '.arrange(RIGHT' in line or '.arrange( RIGHT' in line:
-            # Scan backward to find the VGroup opening and check for long Thai
             has_long_thai = False
             for back in range(i, max(i - 20, 0), -1):
                 if thai_long.search(lines[back]) and 'Text(' in lines[back]:
@@ -583,7 +473,6 @@ def _fix_arrange_right_long_thai(code: str, fixes: list[str]) -> str:
                     break
             
             if has_long_thai:
-                # Replace .arrange(RIGHT, buff=...) with .arrange(DOWN, aligned_edge=LEFT, buff=0.15)
                 new_line = re.sub(
                     r'\.arrange\s*\(\s*RIGHT\s*(?:,\s*buff\s*=\s*[\d.]+)?\s*\)',
                     '.arrange(DOWN, aligned_edge=LEFT, buff=0.15)',
@@ -626,7 +515,7 @@ def _fix_indicate_flash(code: str, fixes: list[str]) -> str:
 
 
 def _fix_font_in_mathtex(code: str, fixes: list[str]) -> str:
-    """Remove font= parameter from MathTex/Tex calls (not supported)."""
+    """Remove font= parameter from MathTex/Tex calls."""
     pattern = re.compile(r"((?:MathTex|Tex)\s*\([^)]*),\s*font\s*=\s*'[^']*'([^)]*\))")
     if pattern.search(code):
         fixes.append("AUTO-FIX: Removed font= parameter from MathTex/Tex (not supported)")
@@ -635,10 +524,7 @@ def _fix_font_in_mathtex(code: str, fixes: list[str]) -> str:
 
 
 def _fix_mathrm_curly_braces(code: str, fixes: list[str]) -> str:
-    """
-    Fix \\mathrm{} with no content or broken braces inside MathTex strings.
-    """
-    # Fix \\mathrm{} → nothing
+    """Fix \\mathrm{} with no content."""
     if r'\\mathrm{}' in code:
         fixes.append("AUTO-FIX: Removed empty \\mathrm{}")
         code = code.replace(r'\\mathrm{}', '')
@@ -652,11 +538,10 @@ def _fix_mathrm_curly_braces(code: str, fixes: list[str]) -> str:
 def _detect_latex_in_text(lines: list[str]) -> list[Violation]:
     """Detect remaining LaTeX syntax in Text() after auto-fixes."""
     violations = []
-    # After auto-fix, only flag if there are actual LaTeX sequences remaining
     latex_in_text = re.compile(
         r'Text\s*\([^)]*(?:'
-        r'\\\\(?:frac|sqrt|sum|int|prod|lim|partial)'  # Complex LaTeX that can't be unicode-ified
-        r'|\\\\[\(\[\\]'             # \\( \\[ \\\ delimiters
+        r'\\\\(?:frac|sqrt|sum|int|prod|lim|partial)'
+        r'|\\\\[\(\[\\]'
         r')[^)]*\)'
     )
     for i, line in enumerate(lines, 1):
@@ -680,7 +565,6 @@ def _detect_thai_in_mathtex(lines: list[str]) -> list[Violation]:
     mathtex_pattern = re.compile(r'(MathTex|Tex)\s*\(')
     for i, line in enumerate(lines, 1):
         if mathtex_pattern.search(line) and thai_range.search(line):
-            # Skip lines where Thai is in a comment
             code_part = line.split('#')[0]
             if mathtex_pattern.search(code_part) and thai_range.search(code_part):
                 violations.append(Violation(
@@ -926,24 +810,175 @@ def _detect_unbalanced_latex_braces(lines: list[str]) -> list[Violation]:
     return violations
 
 
-def _detect_latex_in_text_calls(lines: list[str]) -> list[Violation]:
-    """Detect remaining LaTeX escapes in Text() after all auto-fixes."""
+def _detect_math_errors(lines: list[str]) -> list[Violation]:
+    """
+    Detect common mathematical errors in equations.
+    """
     violations = []
-    # Only flag complex LaTeX that truly can't be rendered in Text()
-    pattern = re.compile(
-        r'Text\s*\([^)]*\\(?:frac|sqrt|sum|int|partial|binom)[^)]*\)'
-    )
+    
     for i, line in enumerate(lines, 1):
-        if 'Text(' in line and pattern.search(line):
+        # Check for \equiv used incorrectly
+        if r'\equiv' in line and 'MathTex' in line:
             violations.append(Violation(
-                rule="LATEX_ESCAPE_IN_TEXT",
+                rule="MATH_EQUIV_INCORRECT",
                 line=i,
                 snippet=line.strip()[:80],
                 description=(
-                    "พบ LaTeX complex (\\frac, \\sqrt ฯลฯ) ใน Text() — "
-                    "ต้องแยกเป็น MathTex() แล้วรวมด้วย VGroup"
+                    "พบ \\equiv ในสมการ — ควรใช้ = แทน \\equiv "
+                    "(\\equiv ใช้สำหรับเอกลักษณ์/นิยามเท่านั้น)"
                 )
             ))
+        
+        # Check for wrong final velocity calculation
+        if 'sqrt{200^2 + 200^2}' in line and '200^2' in line and 'MathTex' in line:
+            if '200\\sqrt{2}' not in line:
+                violations.append(Violation(
+                    rule="MATH_SQRT_WRONG",
+                    line=i,
+                    snippet=line.strip()[:80],
+                    description=(
+                        "พบ sqrt(200² + 200²) = 200² — ผิด! "
+                        "ต้องเป็น sqrt(200² + 200²) = 200√2"
+                    )
+                ))
+        
+        # Check for unescaped backslashes in MathTex
+        if 'MathTex' in line:
+            # Look for MathTex string content
+            match = re.search(r'MathTex\s*\(\s*r[\'"]([^\'"]*)[\'"]', line)
+            if match:
+                content = match.group(1)
+                # Check for \frac without proper escaping
+                if r'\frac' in content and r'\\frac' not in content:
+                    violations.append(Violation(
+                        rule="MATH_BACKSLASH_MISSING",
+                        line=i,
+                        snippet=line.strip()[:80],
+                        description=(
+                            "พบ LaTeX command ใน MathTex ที่ไม่มี backslash escape "
+                            "(ต้องมี \\\\frac) — ตัวอย่าง: MathTex(r'\\\\frac{{1}}{{2}}')"
+                        )
+                    ))
+                
+                # Check for \sqrt without proper escaping
+                if r'\sqrt' in content and r'\\sqrt' not in content:
+                    violations.append(Violation(
+                        rule="MATH_BACKSLASH_MISSING",
+                        line=i,
+                        snippet=line.strip()[:80],
+                        description=(
+                            "พบ LaTeX command ใน MathTex ที่ไม่มี backslash escape "
+                            "(ต้องมี \\\\sqrt) — ตัวอย่าง: MathTex(r'\\\\sqrt{{x}}')"
+                        )
+                    ))
+    
+    return violations
+
+
+def _detect_missing_scaling(lines: list[str]) -> list[Violation]:
+    """
+    Detect VGroups in bottom/middle zone without scaling.
+    """
+    violations = []
+    
+    vgroups = {}
+    scaled_vgroups = set()
+    
+    for i, line in enumerate(lines, 1):
+        vgroup_match = re.search(r'(\w+)\s*=\s*VGroup\(', line)
+        if vgroup_match:
+            var_name = vgroup_match.group(1)
+            if 'bottom' in line or 'middle' in line:
+                vgroups[var_name] = i
+        
+        scale_match = re.search(r'(\w+)\.scale_to_fit_(width|height)', line)
+        if scale_match:
+            var_name = scale_match.group(1)
+            if var_name in vgroups:
+                scaled_vgroups.add(var_name)
+    
+    for var_name, line_num in vgroups.items():
+        if var_name not in scaled_vgroups:
+            violations.append(Violation(
+                rule="MISSING_SCALING",
+                line=line_num,
+                snippet=f"{var_name} = VGroup(...)",
+                description=(
+                    f"พบ VGroup {var_name} ในโซนล่าง/กลางแต่ไม่มี .scale_to_fit_width() — "
+                    "อาจทำให้ข้อความล้นจอ ต้องเพิ่ม scaling"
+                )
+            ))
+    
+    return violations
+
+
+def _detect_font_size_violations(lines: list[str]) -> list[Violation]:
+    """
+    Detect font_size > 28 in Text()/MathTex().
+    """
+    violations = []
+    
+    for i, line in enumerate(lines, 1):
+        text_match = re.search(r'Text\([^)]*font_size\s*=\s*(\d+)', line)
+        if text_match:
+            size = int(text_match.group(1))
+            if size > 28:
+                violations.append(Violation(
+                    rule="FONT_SIZE_TOO_LARGE",
+                    line=i,
+                    snippet=line.strip()[:80],
+                    description=f"font_size={size} ใน Text() — ต้อง ≤ 28"
+                ))
+        
+        math_match = re.search(r'MathTex\([^)]*font_size\s*=\s*(\d+)', line)
+        if math_match:
+            size = int(math_match.group(1))
+            if size > 28:
+                violations.append(Violation(
+                    rule="FONT_SIZE_TOO_LARGE",
+                    line=i,
+                    snippet=line.strip()[:80],
+                    description=f"font_size={size} ใน MathTex() — ต้อง ≤ 28"
+                ))
+    
+    return violations
+
+
+def _detect_bottom_zone_empty(lines: list[str]) -> list[Violation]:
+    """
+    Detect if bottom zone has no content (empty for too long).
+    Only flag if there are LESS than 2 steps AND the episode has content.
+    """
+    violations = []
+    
+    # Count how many step groups are in the bottom zone
+    bottom_step_count = 0
+    for i, line in enumerate(lines, 1):
+        if 'bottom_center' in line and 'VGroup(' in line:
+            for j in range(i, min(i + 10, len(lines))):
+                if 'MathTex' in lines[j]:
+                    bottom_step_count += 1
+                    break
+    
+    # Only flag if there are LESS than 2 steps AND the episode has content
+    if bottom_step_count < 2:
+        has_content = False
+        for line in lines[:50]:
+            if 'Text(' in line or 'MathTex' in line or 'Axes' in line:
+                has_content = True
+                break
+        
+        if has_content:
+            violations.append(Violation(
+                rule="BOTTOM_ZONE_EMPTY",
+                line=1,
+                snippet="construct() method",
+                description=(
+                    "พบ bottom zone มี content น้อยเกินไป (ควรมีอย่างน้อย 2 ขั้นตอน) — "
+                    "โจทย์ต้องมีขั้นตอนการคำนวณที่ชัดเจน"
+                )
+            ))
+    
     return violations
 
 
@@ -974,15 +1009,15 @@ def preprocess_code(code_string: str) -> ValidationResult:
     code = _fix_bottom_zone_bottom(code, auto_fixes)
     code = _fix_move_to_scalar(code, auto_fixes)
     code = _fix_include_numbers_in_axis_config(code, auto_fixes)
-    code = _fix_axes_too_large(code, auto_fixes)        # ← NEW: clamp instead of escalate
-    code = _fix_font_size_too_large(code, auto_fixes)   # ← NEW: clamp instead of escalate
+    code = _fix_axes_too_large(code, auto_fixes)
+    code = _fix_font_size_too_large(code, auto_fixes)
     
     # 3. String content fixes (order: most specific first)
-    code = _fix_vgroup_list_comprehension(code, auto_fixes)  # ← KEY NEW FIX
-    code = _fix_latex_in_text_calls(code, auto_fixes)         # ← KEY NEW FIX
-    code = _fix_step_title_latex(code, auto_fixes)            # ← KEY NEW FIX
-    code = _fix_thai_in_mathrm(code, auto_fixes)              # ← KEY NEW FIX
-    code = _fix_arrange_right_long_thai(code, auto_fixes)     # ← KEY NEW FIX
+    code = _fix_vgroup_list_comprehension(code, auto_fixes)
+    code = _fix_latex_in_text_calls(code, auto_fixes)
+    code = _fix_step_title_latex(code, auto_fixes)
+    code = _fix_thai_in_mathrm(code, auto_fixes)
+    code = _fix_arrange_right_long_thai(code, auto_fixes)
     code = _fix_text_in_mathtex(code, auto_fixes)
     code = _fix_single_backslash_lambda(code, auto_fixes)
     code = _fix_latex_escape_in_text(code, auto_fixes)
@@ -992,6 +1027,8 @@ def preprocess_code(code_string: str) -> ValidationResult:
     # ── Phase 2: Detect remaining violations ─────────────────────────────────
     lines = code.splitlines()
     violations: list[Violation] = []
+    
+    # Existing validations
     violations.extend(_detect_missing_numpy_import(lines))
     violations.extend(_detect_thai_in_mathtex(lines))
     violations.extend(_detect_thai_in_mathrm(lines))
@@ -1003,7 +1040,12 @@ def preprocess_code(code_string: str) -> ValidationResult:
     violations.extend(_detect_final_answer_arrange_right(lines))
     violations.extend(_detect_vgroup_list_comprehension(lines))
     violations.extend(_detect_unbalanced_latex_braces(lines))
-    violations.extend(_detect_latex_in_text_calls(lines))
+    
+    # New validations
+    violations.extend(_detect_math_errors(lines))
+    violations.extend(_detect_missing_scaling(lines))
+    violations.extend(_detect_font_size_violations(lines))
+    violations.extend(_detect_bottom_zone_empty(lines))
 
     return ValidationResult(
         fixed_code=code,
