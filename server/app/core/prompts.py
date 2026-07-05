@@ -142,16 +142,31 @@ Unicode อ้างอิงสำหรับ Text():
 กฎ 8: JSON string encoding — backslash ต้องเป็นคู่ใน JSON
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ใน manim_code_lines array แต่ละ string คือบรรทัดของ Python code
-backslash ใน LaTeX จึงต้องเป็น 4 ตัวใน JSON (\\\\frac) เพื่อให้ได้ \\frac ใน Python
+ใน manim_code_lines array แต่ละ string คือบรรทัดของ Python code (literal source
+code text) — มันจะถูกเขียนลงไฟล์ .py ตรงๆ โดยไม่มีการตีความเพิ่มเติมอีก
 
-ตัวอย่าง JSON ที่ถูก:
+เป้าหมาย: ใน LaTeX ต้องการ backslash แค่ 1 ตัว (เช่น \frac ไม่ใช่ \\frac) เพราะ
+MathTex(r'...') เป็น raw string — Python จะ "ไม่" ลด \\\\ เหลือ \\ ให้เหมือน
+string ปกติ ดังนั้นถ้าใน source มี backslash 2 ตัวติดกัน (\\frac) LaTeX จะเห็นมันเป็น
+"\\" (คำสั่งขึ้นบรรทัดใหม่) ตามด้วยตัวอักษรธรรมดา "frac{...}" ซึ่งจะเพี้ยนเป็นข้อความ
+ตัวหนังสือ (เช่น "mathrm{m/s}" ปรากฏเป็นตัวหนังสือดิบในวิดีโอ) — ห้ามทำแบบนี้เด็ดขาด
+
+เนื่องจากค่าที่เก็บใน JSON string ต้องผ่านการ decode JSON escape ก่อนจะกลายเป็น
+บรรทัด source code จริง กฎคือ: **backslash 1 ตัวที่ต้องการใน source code
+ต้องเขียนเป็น backslash 2 ตัวใน JSON (\\\\)** — เท่านั้น ห้ามเขียน 4 ตัว
+
+ตัวอย่าง JSON ที่ถูก (2 backslash ใน JSON → 1 backslash ใน source → \frac ใน LaTeX):
   "manim_code_lines": [
     "        eq1 = MathTex(r'\\\\frac{1}{2}g t^2', font_size=26, color=BLUE_C)",
     "        eq2 = MathTex(r'\\\\lambda = 0.80\\\\,\\\\mathrm{m}', font_size=26)"
   ]
-หมายเหตุ: r-string prefix ทำให้ Python ไม่ตีความ backslash ดังนั้น \\\\frac ใน JSON
-→ \\frac ใน Python string → \frac ใน LaTeX ✓
+เมื่อ decode JSON แล้ว บรรทัด source code ที่ได้ต้องมี backslash แค่ 1 ตัวเท่านั้น:
+  eq1 = MathTex(r'\frac{1}{2}g t^2', font_size=26, color=BLUE_C)
+  eq2 = MathTex(r'\lambda = 0.80\,\mathrm{m}', font_size=26)
+
+❌ ห้ามเขียน JSON แบบนี้ (4 backslash ใน JSON) เพราะจะได้ 2 backslash ใน source
+ซึ่งพัง LaTeX ทันที:
+  "eq1 = MathTex(r'\\\\\\\\frac{1}{2}g t^2', font_size=26, color=BLUE_C)"   ← ผิด!
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 กฎ 9: Axes ห้ามใหญ่เกินขนาด zone — กำหนด x_length/y_length ตามนี้เท่านั้น

@@ -28,18 +28,18 @@ class PhysicsScene(Scene):
         middle_center = np.array([0, middle_zone_center_y, 0])
         bottom_center = np.array([0, bottom_zone_center_y, 0])
 
-        # Top Zone: Title & Problem
-        title = Text('โพรเจกไทล์: ปาวัตถุแนวราบ', font='TH Sarabun New', font_size=28, color=GOLD_B)
-        prob_line1 = Text('ปาวัตถุจากที่สูง 80 m ตกห่างจากจุดปา 20 m', font='TH Sarabun New', font_size=24, color=GRAY_A)
-        prob_line2 = Text('จงหาอัตราเร็วต้นในแนวราบ (u_x)', font='TH Sarabun New', font_size=24, color=GRAY_A)
-        top_group = VGroup(title, prob_line1, prob_line2).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
-        if top_group.width > frame_width * 0.88:
-            top_group.scale_to_fit_width(frame_width * 0.88)
+        # Top Zone Content
+        title = Text('โพรเจกไทล์แนวราบ: หาอัตราเร็วต้น', font='TH Sarabun New', font_size=28, color=GOLD_B)
+        problem_text = VGroup(
+            Text('ขว้างวัตถุแนวราบจากที่สูง 80 m ตกห่างจากตึก 20 m', font='TH Sarabun New', font_size=22, color=GRAY_A),
+            Text('จงหาอัตราเร็วต้นในแนวราบ (u_x)', font='TH Sarabun New', font_size=22, color=GRAY_A)
+        ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
+        top_group = VGroup(title, problem_text).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        top_group.scale_to_fit_width(frame_width * 0.88)
         top_group.move_to(top_center)
         self.play(FadeIn(top_group, shift=UP*0.15))
-        self.wait(1.0)
 
-        # Middle Zone: Visualization (Axes + Trajectory)
+        # Middle Zone Content (Visualization)
         axes = Axes(
             x_range=[0, 25, 5],
             y_range=[0, 90, 10],
@@ -54,7 +54,7 @@ class PhysicsScene(Scene):
             }
         )
         x_label = axes.get_x_axis_label(
-            Text('ระยะทางราบ (m)', font='TH Sarabun New', font_size=16, color=GRAY_A),
+            Text('ระยะทางแนวราบ (m)', font='TH Sarabun New', font_size=16, color=GRAY_A),
             edge=DOWN, direction=DOWN, buff=0.3
         )
         y_label = axes.get_y_axis_label(
@@ -62,44 +62,73 @@ class PhysicsScene(Scene):
             edge=LEFT, direction=LEFT, buff=0.3
         )
 
-        def traj(t):
-            return axes.coords_to_point(5 * t, 80 - 5 * t**2)
-        
-        path = ParametricFunction(traj, t_range=[0, 4], color=TEAL_C, stroke_width=4)
-        start_dot = Dot(axes.coords_to_point(0, 80), color=RED_C, radius=0.08)
-        end_dot = Dot(axes.coords_to_point(20, 0), color=GREEN_C, radius=0.08)
-        
-        vis_group = VGroup(axes, x_label, y_label, path, start_dot, end_dot)
-        vis_group.scale_to_fit_width(frame_width * 0.88)
-        vis_group.scale_to_fit_height(middle_zone_height * 0.82)
-        vis_group.move_to(middle_center)
-        
-        self.play(Create(axes), FadeIn(x_label), FadeIn(y_label))
-        self.play(Create(path), FadeIn(start_dot), FadeIn(end_dot))
-        self.wait(1.0)
+        def traj_func(t):
+            return axes.coords_to_point(5 * t, 80 - 5 * (t**2))
 
-        # Bottom Zone: Equations & Steps
-        step1_title = Text('ขั้นตอนที่ 1: หาเวลา (t) จากแนวดิ่ง', font='TH Sarabun New', font_size=26, color=GOLD_B)
-        eq1_1 = MathTex(r's_y = u_y t + \\frac{1}{2} g t^2', font_size=26, color=WHITE)
-        eq1_2 = MathTex(r'80 = 0 + \\frac{1}{2}(10)t^2', font_size=26, color=WHITE)
-        eq1_3 = MathTex(r't^2 = 16 \\Rightarrow t = 4\\,\\mathrm{s}', font_size=26, color=GREEN_C)
-        
-        step1_group = VGroup(step1_title, eq1_1, eq1_2, eq1_3).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        trajectory = ParametricFunction(traj_func, t_range=[0, 4], color=TEAL_C, stroke_width=4)
+        start_dot = Dot(axes.coords_to_point(0, 80), color=BLUE_C, radius=0.08)
+        end_dot = Dot(axes.coords_to_point(20, 0), color=RED_C, radius=0.08)
+
+        start_label = Text('จุดปล่อย (y = 80 m)', font='TH Sarabun New', font_size=14, color=BLUE_C).next_to(start_dot, RIGHT, buff=0.1)
+        end_label = Text('จุดตก (x = 20 m)', font='TH Sarabun New', font_size=14, color=RED_C).next_to(end_dot, UP, buff=0.1)
+
+        v_vector = Arrow(
+            start=axes.coords_to_point(0, 80),
+            end=axes.coords_to_point(5, 80),
+            buff=0,
+            color=YELLOW_C,
+            stroke_width=3,
+            max_tip_length_to_length_ratio=0.25
+        )
+        v_vector_label = MathTex(r'u_x', font_size=18, color=YELLOW_C).next_to(v_vector, UP, buff=0.05)
+
+        axes_group = VGroup(axes, x_label, y_label, trajectory, start_dot, end_dot, start_label, end_label, v_vector, v_vector_label)
+        axes_group.scale_to_fit_width(frame_width * 0.88)
+        axes_group.scale_to_fit_height(middle_zone_height * 0.82)
+        axes_group.move_to(middle_center)
+
+        self.play(Create(axes), Write(x_label), Write(y_label))
+        self.play(FadeIn(start_dot), FadeIn(start_label))
+        self.play(Create(v_vector), Write(v_vector_label))
+        self.play(Create(trajectory, run_time=2), FadeIn(end_dot), FadeIn(end_label))
+        self.wait(0.8)
+
+        # Bottom Zone Content (Step 1)
+        step1_title = Text('ขั้นตอนที่ 1: หาเวลาจากแนวดิ่ง (s_y = 80 m)', font='TH Sarabun New', font_size=26, color=BLUE_C)
+        eq1_1 = MathTex(r's_y = u_y t + \frac{1}{2} g t^2', font_size=26, color=WHITE)
+        eq1_2 = MathTex(r'80 = 0 + \frac{1}{2}(10)t^2', font_size=26, color=WHITE)
+        eq1_3 = MathTex(r'5t^2 = 80 \\implies t^2 = 16 \\implies t = 4\,\mathrm{s}', font_size=26, color=GREEN_C)
+
+        step1_group = VGroup(step1_title, eq1_1, eq1_2, eq1_3).arrange(DOWN, aligned_edge=LEFT, buff=0.2)
         step1_group.scale_to_fit_width(frame_width * 0.88)
+        step1_group.scale_to_fit_height(bottom_zone_height * 0.88)
         step1_group.move_to(bottom_center)
-        
-        self.play(FadeIn(step1_group, shift=UP*0.15))
-        self.wait(2.0)
-        
-        step2_title = Text('ขั้นตอนที่ 2: หาอัตราเร็วแนวราบ (u_x)', font='TH Sarabun New', font_size=26, color=GOLD_B)
+
+        self.play(Write(step1_title))
+        self.play(Write(eq1_1))
+        self.wait(0.5)
+        self.play(Write(eq1_2))
+        self.wait(0.5)
+        self.play(Write(eq1_3))
+        self.wait(1.5)
+
+        # Bottom Zone Content (Step 2)
+        self.play(FadeOut(step1_group))
+
+        step2_title = Text('ขั้นตอนที่ 2: หาอัตราเร็วแนวราบ (s_x = 20 m)', font='TH Sarabun New', font_size=26, color=BLUE_C)
         eq2_1 = MathTex(r's_x = u_x t', font_size=26, color=WHITE)
         eq2_2 = MathTex(r'20 = u_x (4)', font_size=26, color=WHITE)
-        eq2_3 = MathTex(r'u_x = 5\\,\\mathrm{m/s}', font_size=26, color=GREEN_C)
-        
-        step2_group = VGroup(step2_title, eq2_1, eq2_2, eq2_3).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        eq2_3 = MathTex(r'u_x = \frac{20}{4} = 5\,\mathrm{m/s}', font_size=26, color=GREEN_C)
+
+        step2_group = VGroup(step2_title, eq2_1, eq2_2, eq2_3).arrange(DOWN, aligned_edge=LEFT, buff=0.2)
         step2_group.scale_to_fit_width(frame_width * 0.88)
+        step2_group.scale_to_fit_height(bottom_zone_height * 0.88)
         step2_group.move_to(bottom_center)
-        
-        self.play(FadeOut(step1_group, shift=DOWN*0.15))
-        self.play(FadeIn(step2_group, shift=UP*0.15))
+
+        self.play(Write(step2_title))
+        self.play(Write(eq2_1))
+        self.wait(0.5)
+        self.play(Write(eq2_2))
+        self.wait(0.5)
+        self.play(Write(eq2_3))
         self.wait(2.0)

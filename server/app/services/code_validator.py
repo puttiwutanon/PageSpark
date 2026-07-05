@@ -120,6 +120,56 @@ def _fix_single_backslash_lambda(code: str, fixes: list[str]) -> str:
     return pattern.sub(replacer, code)
 
 
+def _fix_over_escaped_latex(code: str, fixes: list[str]) -> str:
+    """
+    Collapse over-escaped LaTeX commands inside MathTex(r'...')/Tex(r'...') calls.
+
+    ROOT CAUSE: MathTex(r'...') is a raw string. Raw strings do NOT collapse
+    '\\\\' down to '\\' the way a normal Python string does -- every backslash
+    character written in the source survives unchanged into the runtime string.
+    So if the source line contains r'...\\frac...' (two literal backslash
+    characters), LaTeX receives '\\frac' verbatim. LaTeX reads two backslashes
+    as a line-break control symbol ('\\') followed by ordinary text, so the
+    rest of the command ('frac{...}') prints as literal garbled text instead
+    of being interpreted as a command. This is the cause of text like
+    "mathrm{m/s}" appearing verbatim in rendered videos instead of rendering
+    as a fraction/unit.
+
+    This auto-fixer finds MathTex(r'...')/Tex(r'...') calls and collapses any
+    run of 2+ backslashes immediately before a known LaTeX command name (or
+    spacing command like \\, \\; \\!) down to exactly one backslash. It runs
+    regardless of what the LLM was told to do, so it catches the bug even if
+    the generation prompt is ever wrong again.
+    """
+    known_commands = [
+        'frac', 'sqrt', 'lambda', 'Lambda', 'phi', 'Phi', 'theta', 'Theta',
+        'Delta', 'delta', 'pi', 'Pi', 'mathrm', 'mathbf', 'cdot', 'times',
+        'approx', 'circ', 'alpha', 'beta', 'gamma', 'Gamma', 'sigma', 'Sigma',
+        'omega', 'Omega', 'mu', 'nu', 'epsilon', 'rho', 'tau', 'chi', 'psi',
+        'eta', 'xi', 'zeta', 'vec', 'hat', 'pm', 'leq', 'geq', 'neq',
+        'Rightarrow', 'rightarrow', 'Leftarrow', 'leftarrow', 'quad', 'qquad',
+        'left', 'right', 'infty', 'sum', 'int', 'partial', 'equiv', 'propto',
+    ]
+    cmd_alt = '|'.join(known_commands)
+    # Matches a run of 2+ literal backslash characters immediately followed by
+    # a known command name (word boundary) OR by one of the spacing commands.
+    double_bs_pattern = re.compile(rf'\\{{2,}}(?=(?:{cmd_alt})\b|[,;!])')
+
+    pattern = re.compile(r"((?:MathTex|Tex)\s*\(\s*r')([^']*)(')")
+
+    def replacer(m):
+        prefix, content, suffix = m.group(1), m.group(2), m.group(3)
+        new_content = double_bs_pattern.sub(r'\\', content)
+        if new_content != content:
+            fixes.append(
+                "AUTO-FIX: Collapsed over-escaped LaTeX backslash(es) in "
+                f"{prefix.strip()}'{content[:50]}...' -> '{new_content[:50]}...'"
+            )
+        return prefix + new_content + suffix
+
+    return pattern.sub(replacer, code)
+
+
 def _fix_vgroup_list_comprehension(code: str, fixes: list[str]) -> str:
     """
     Auto-fix VGroup(*[Text(line, ...) for line in ['a', 'b', 'c']]) →
@@ -813,9 +863,22 @@ def _detect_unbalanced_latex_braces(lines: list[str]) -> list[Violation]:
 def _detect_math_errors(lines: list[str]) -> list[Violation]:
     """
     Detect common mathematical errors in equations.
+
+    NOTE: the old MATH_BACKSLASH_MISSING checks that lived here have been
+    REMOVED. They checked `r'\\frac' in content and r'\\\\frac' not in
+    content`, which is backwards: a CORRECTLY single-escaped raw string
+    (content == '\\frac{1}{2}', exactly one backslash) always satisfies
+    this condition too, because the single-backslash substring '\\frac' is
+    trivially found inside itself. So this rule flagged correct code as
+    broken and told Gemini (via its own description text, which said
+    '\\\\frac' i.e. double-backslash) to add a SECOND backslash -- which is
+    exactly what produces the garbled "mathrm{m/s}"-style text bug. The
+    real fix for over-escaping is the deterministic `_fix_over_escaped_latex`
+    auto-fixer (Phase 1), which runs before this detector and needs no LLM
+    call at all.
     """
     violations = []
-    
+
     for i, line in enumerate(lines, 1):
         # Check for \equiv used incorrectly
         if r'\equiv' in line and 'MathTex' in line:
@@ -828,87 +891,80 @@ def _detect_math_errors(lines: list[str]) -> list[Violation]:
                     "(\\equiv ใช้สำหรับเอกลักษณ์/นิยามเท่านั้น)"
                 )
             ))
-        
-        # Check for wrong final velocity calculation
+
+        # Check for wrong final velocity calculation. Look at a forward
+        # window of lines (not just this one) since the correct final
+        # answer is often written on a LATER MathTex/variable, e.g.:
+        #   eq4 = MathTex(r'v = \sqrt{200^2 + 200^2}', ...)
+        #   eq5 = MathTex(r'v = 200\sqrt{2}\,\mathrm{m/s}', ...)
+        # Checking only `line` for '200\sqrt{2}' incorrectly flags eq4 even
+        # though eq5 (a few lines later) already has the correct answer.
         if 'sqrt{200^2 + 200^2}' in line and '200^2' in line and 'MathTex' in line:
-            if '200\\sqrt{2}' not in line:
+            window = "\n".join(lines[i - 1:min(i + 5, len(lines))])
+            if '200\\sqrt{2}' not in window and '200\\\\sqrt{2}' not in window:
                 violations.append(Violation(
                     rule="MATH_SQRT_WRONG",
                     line=i,
                     snippet=line.strip()[:80],
                     description=(
-                        "พบ sqrt(200² + 200²) = 200² — ผิด! "
+                        "พบ sqrt(200² + 200²) แต่ไม่พบคำตอบ 200√2 ในสมการถัดไป — "
                         "ต้องเป็น sqrt(200² + 200²) = 200√2"
                     )
                 ))
-        
-        # Check for unescaped backslashes in MathTex
-        if 'MathTex' in line:
-            # Look for MathTex string content
-            match = re.search(r'MathTex\s*\(\s*r[\'"]([^\'"]*)[\'"]', line)
-            if match:
-                content = match.group(1)
-                # Check for \frac without proper escaping
-                if r'\frac' in content and r'\\frac' not in content:
-                    violations.append(Violation(
-                        rule="MATH_BACKSLASH_MISSING",
-                        line=i,
-                        snippet=line.strip()[:80],
-                        description=(
-                            "พบ LaTeX command ใน MathTex ที่ไม่มี backslash escape "
-                            "(ต้องมี \\\\frac) — ตัวอย่าง: MathTex(r'\\\\frac{{1}}{{2}}')"
-                        )
-                    ))
-                
-                # Check for \sqrt without proper escaping
-                if r'\sqrt' in content and r'\\sqrt' not in content:
-                    violations.append(Violation(
-                        rule="MATH_BACKSLASH_MISSING",
-                        line=i,
-                        snippet=line.strip()[:80],
-                        description=(
-                            "พบ LaTeX command ใน MathTex ที่ไม่มี backslash escape "
-                            "(ต้องมี \\\\sqrt) — ตัวอย่าง: MathTex(r'\\\\sqrt{{x}}')"
-                        )
-                    ))
-    
+
     return violations
 
 
 def _detect_missing_scaling(lines: list[str]) -> list[Violation]:
     """
     Detect VGroups in bottom/middle zone without scaling.
+
+    NOTE: this used to decide "is this VGroup in the bottom/middle zone?" by
+    checking whether the literal words "bottom" or "middle" appeared in the
+    text of the VGroup's *assignment* line -- which only happens to be true
+    if the variable itself is named with "bottom"/"middle" in it. Variables
+    like `step1_group` or `prob_desc` never match, and variables like
+    `bottom_zone_height` (a float, not a VGroup) can spuriously match other
+    unrelated lines. This version instead checks whether the SAME variable
+    is later moved to `bottom_center`/`middle_center` -- which is the actual
+    definition of "being in that zone" -- and only then requires a scaling
+    call on that variable.
     """
     violations = []
-    
-    vgroups = {}
-    scaled_vgroups = set()
-    
-    for i, line in enumerate(lines, 1):
-        vgroup_match = re.search(r'(\w+)\s*=\s*VGroup\(', line)
-        if vgroup_match:
-            var_name = vgroup_match.group(1)
-            if 'bottom' in line or 'middle' in line:
-                vgroups[var_name] = i
-        
-        scale_match = re.search(r'(\w+)\.scale_to_fit_(width|height)', line)
-        if scale_match:
-            var_name = scale_match.group(1)
-            if var_name in vgroups:
-                scaled_vgroups.add(var_name)
-    
-    for var_name, line_num in vgroups.items():
-        if var_name not in scaled_vgroups:
+
+    vgroup_assign_pattern = re.compile(r'(\w+)\s*=\s*VGroup\(')
+    zone_targets = ('bottom_center', 'middle_center')
+
+    for i, line in enumerate(lines):
+        m = vgroup_assign_pattern.search(line)
+        if not m:
+            continue
+        var_name = m.group(1)
+        if 'axes' in var_name.lower():
+            continue  # Axes groups don't need scaling
+
+        window = lines[max(0, i - 10):min(i + 15, len(lines))]
+        window_text = "\n".join(window)
+
+        in_zone = any(f'{var_name}.move_to({target})' in window_text for target in zone_targets)
+        if not in_zone:
+            continue  # not a bottom/middle-zone VGroup -- rule doesn't apply
+
+        has_scaling = (
+            f'{var_name}.scale_to_fit_width' in window_text
+            or f'{var_name}.scale_to_fit_height' in window_text
+        )
+        if not has_scaling:
             violations.append(Violation(
                 rule="MISSING_SCALING",
-                line=line_num,
+                line=i + 1,
                 snippet=f"{var_name} = VGroup(...)",
                 description=(
                     f"พบ VGroup {var_name} ในโซนล่าง/กลางแต่ไม่มี .scale_to_fit_width() — "
                     "อาจทำให้ข้อความล้นจอ ต้องเพิ่ม scaling"
                 )
             ))
-    
+
     return violations
 
 
@@ -948,18 +1004,42 @@ def _detect_bottom_zone_empty(lines: list[str]) -> list[Violation]:
     """
     Detect if bottom zone has no content (empty for too long).
     Only flag if there are LESS than 2 steps AND the episode has content.
+
+    NOTE: this used to require 'bottom_center' and 'VGroup(' on the SAME
+    line, which never happens with the standard boilerplate this project
+    uses -- the VGroup is always assigned on one line and moved to
+    bottom_center on a LATER line, e.g.:
+        step1_group = VGroup(step1_title, eq1, eq2, eq3).arrange(...)
+        ...
+        step1_group.move_to(bottom_center)
+    That made this rule fire on essentially every episode regardless of
+    whether the bottom zone actually had content (confirmed: Episode 3 in
+    testing rendered fine despite being flagged). This version follows each
+    VGroup assignment forward to see if THAT SAME VARIABLE is later moved
+    to bottom_center and contains a MathTex step.
     """
     violations = []
-    
-    # Count how many step groups are in the bottom zone
+
+    vgroup_assign_pattern = re.compile(r'(\w+)\s*=\s*VGroup\(')
     bottom_step_count = 0
-    for i, line in enumerate(lines, 1):
-        if 'bottom_center' in line and 'VGroup(' in line:
-            for j in range(i, min(i + 10, len(lines))):
-                if 'MathTex' in lines[j]:
-                    bottom_step_count += 1
-                    break
-    
+
+    for i, line in enumerate(lines):
+        m = vgroup_assign_pattern.search(line)
+        if not m:
+            continue
+        var_name = m.group(1)
+        # The MathTex objects a VGroup wraps are almost always DEFINED BEFORE
+        # the VGroup(...) line (e.g. `eq1 = MathTex(...)` then later
+        # `step1_group = VGroup(step1_title, eq1, eq2, eq3)`), while
+        # `.move_to(bottom_center)` comes AFTER. So the window must look both
+        # backward and forward from this line, not forward-only.
+        window = lines[max(0, i - 15):min(i + 25, len(lines))]
+        window_text = "\n".join(window)
+        moved_to_bottom = f'{var_name}.move_to(bottom_center)' in window_text
+        has_mathtex = 'MathTex' in window_text
+        if moved_to_bottom and has_mathtex:
+            bottom_step_count += 1
+
     # Only flag if there are LESS than 2 steps AND the episode has content
     if bottom_step_count < 2:
         has_content = False
@@ -967,7 +1047,7 @@ def _detect_bottom_zone_empty(lines: list[str]) -> list[Violation]:
             if 'Text(' in line or 'MathTex' in line or 'Axes' in line:
                 has_content = True
                 break
-        
+
         if has_content:
             violations.append(Violation(
                 rule="BOTTOM_ZONE_EMPTY",
@@ -978,7 +1058,7 @@ def _detect_bottom_zone_empty(lines: list[str]) -> list[Violation]:
                     "โจทย์ต้องมีขั้นตอนการคำนวณที่ชัดเจน"
                 )
             ))
-    
+
     return violations
 
 
@@ -1013,6 +1093,9 @@ def preprocess_code(code_string: str) -> ValidationResult:
     code = _fix_font_size_too_large(code, auto_fixes)
     
     # 3. String content fixes (order: most specific first)
+    # Must run BEFORE other MathTex/Text content fixers so they operate on
+    # normalized (single-backslash) LaTeX rather than over-escaped garbage.
+    code = _fix_over_escaped_latex(code, auto_fixes)
     code = _fix_vgroup_list_comprehension(code, auto_fixes)
     code = _fix_latex_in_text_calls(code, auto_fixes)
     code = _fix_step_title_latex(code, auto_fixes)

@@ -28,21 +28,18 @@ class PhysicsScene(Scene):
         middle_center = np.array([0, middle_zone_center_y, 0])
         bottom_center = np.array([0, bottom_zone_center_y, 0])
 
-        # Top Zone: Title & Problem
-        title = Text('โจทย์ข้อ 3: เครื่องบินทิ้งระเบิด', font='TH Sarabun New', font_size=28, color=GOLD_B)
-        prob_desc = VGroup(
-            Text('บินสูง 2000 m ด้วยความเร็ว 200 m/s', font='TH Sarabun New', font_size=24, color=GRAY_A),
-            Text('ก. หาระยะตกแนวราบ ข. หาความเร็วชนพื้น', font='TH Sarabun New', font_size=24, color=GRAY_A)
+        # Top Zone Content
+        title = Text('โพรเจกไทล์: การทิ้งระเบิดจากเครื่องบิน', font='TH Sarabun New', font_size=28, color=GOLD_B)
+        problem_text = VGroup(
+            Text('เครื่องบินบินแนวระดับเร็ว 200 m/s สูงจากพื้น 2000 m', font='TH Sarabun New', font_size=22, color=GRAY_A),
+            Text('ก. หาระยะตกแนวราบ  ข. หาอัตราเร็วขณะกระทบพื้น', font='TH Sarabun New', font_size=22, color=GRAY_A)
         ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
-        
-        top_group = VGroup(title, prob_desc).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
-        if top_group.width > frame_width * 0.88:
-            top_group.scale_to_fit_width(frame_width * 0.88)
+        top_group = VGroup(title, problem_text).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        top_group.scale_to_fit_width(frame_width * 0.88)
         top_group.move_to(top_center)
         self.play(FadeIn(top_group, shift=UP*0.15))
-        self.wait(0.8)
 
-        # Middle Zone: Visualization
+        # Middle Zone Content (Visualization)
         axes = Axes(
             x_range=[0, 5000, 1000],
             y_range=[0, 2500, 500],
@@ -57,72 +54,77 @@ class PhysicsScene(Scene):
             }
         )
         x_label = axes.get_x_axis_label(
-            Text('ระยะทาง x (m)', font='TH Sarabun New', font_size=18, color=GRAY_A),
-            edge=DOWN, direction=DOWN, buff=0.35
+            Text('ระยะทางแนวราบ (m)', font='TH Sarabun New', font_size=16, color=GRAY_A),
+            edge=DOWN, direction=DOWN, buff=0.3
         )
         y_label = axes.get_y_axis_label(
-            Text('ความสูง y (m)', font='TH Sarabun New', font_size=18, color=GRAY_A).rotate(90 * DEGREES),
-            edge=LEFT, direction=LEFT, buff=0.30
+            Text('ความสูง (m)', font='TH Sarabun New', font_size=16, color=GRAY_A).rotate(90 * DEGREES),
+            edge=LEFT, direction=LEFT, buff=0.3
         )
-        
-        flight_line = Line(
-            axes.coords_to_point(-1000, 2000),
-            axes.coords_to_point(0, 2000),
-            color=GRAY_B,
-            stroke_width=2,
-            stroke_dash_array=[5, 5]
-        )
-        
+
         def traj_func(t):
-            x = 200 * t
-            y = 2000 - 5 * (t**2)
-            return axes.coords_to_point(x, y)
-            
-        trajectory = ParametricFunction(
-            traj_func,
-            t_range=[0, 20],
-            color=TEAL_C,
-            stroke_width=3
+            return axes.coords_to_point(200 * t, 2000 - 5 * (t**2))
+
+        trajectory = ParametricFunction(traj_func, t_range=[0, 20], color=TEAL_C, stroke_width=4)
+        start_dot = Dot(axes.coords_to_point(0, 2000), color=BLUE_C, radius=0.08)
+        end_dot = Dot(axes.coords_to_point(4000, 0), color=RED_C, radius=0.08)
+
+        start_label = Text('ปล่อยระเบิด (y = 2000 m)', font='TH Sarabun New', font_size=14, color=BLUE_C).next_to(start_dot, RIGHT, buff=0.1)
+        end_label = Text('จุดตก (x = 4000 m)', font='TH Sarabun New', font_size=14, color=RED_C).next_to(end_dot, UP, buff=0.1)
+
+        v_vector = Arrow(
+            start=axes.coords_to_point(0, 2000),
+            end=axes.coords_to_point(1000, 2000),
+            buff=0,
+            color=YELLOW_C,
+            stroke_width=3,
+            max_tip_length_to_length_ratio=0.25
         )
-        
-        dot = Dot(axes.coords_to_point(0, 2000), color=ORANGE, radius=0.08)
-        
-        axes_group = VGroup(axes, x_label, y_label, flight_line, trajectory, dot)
+        v_vector_label = MathTex(r'u_x = 200\,\mathrm{m/s}', font_size=18, color=YELLOW_C).next_to(v_vector, UP, buff=0.05)
+
+        axes_group = VGroup(axes, x_label, y_label, trajectory, start_dot, end_dot, start_label, end_label, v_vector, v_vector_label)
         axes_group.scale_to_fit_width(frame_width * 0.88)
         axes_group.scale_to_fit_height(middle_zone_height * 0.82)
         axes_group.move_to(middle_center)
-        
+
         self.play(Create(axes), Write(x_label), Write(y_label))
-        self.play(Create(flight_line))
-        self.play(Create(trajectory), run_time=2)
-        self.play(MoveAlongPath(dot, trajectory), run_time=2)
+        self.play(FadeIn(start_dot), FadeIn(start_label))
+        self.play(Create(v_vector), Write(v_vector_label))
+        self.play(Create(trajectory, run_time=2), FadeIn(end_dot), FadeIn(end_label))
         self.wait(0.8)
 
-        # Bottom Zone: Equations (Step 1)
-        step1_title = Text('ก. หาระยะตกแนวราบ (s_x)', font='TH Sarabun New', font_size=26, color=GOLD_B)
-        eq1 = MathTex(r's_y = \\frac{1}{2}gt^2 \\Rightarrow 2000 = 5t^2 \\Rightarrow t = 20\\,\\mathrm{s}', font_size=26, color=WHITE)
-        eq2 = MathTex(r's_x = v_x t = 200 \\times 20 = 4000\\,\\mathrm{m}', font_size=26, color=GREEN_C)
-        
-        step1_group = VGroup(step1_title, eq1, eq2).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
+        # Bottom Zone Content (Step 1)
+        step1_title = Text('ก. หาระยะตกแนวราบ (s_x)', font='TH Sarabun New', font_size=26, color=BLUE_C)
+        eq1_1 = MathTex(r's_y = u_y t + \frac{1}{2} g t^2 \\implies 2000 = 0 + 5t^2 \\implies t = 20\,\mathrm{s}', font_size=24, color=WHITE)
+        eq1_2 = MathTex(r's_x = u_x t = 200 \times 20 = 4000\,\mathrm{m}', font_size=24, color=GREEN_C)
+
+        step1_group = VGroup(step1_title, eq1_1, eq1_2).arrange(DOWN, aligned_edge=LEFT, buff=0.2)
         step1_group.scale_to_fit_width(frame_width * 0.88)
         step1_group.scale_to_fit_height(bottom_zone_height * 0.88)
         step1_group.move_to(bottom_center)
-        
-        self.play(FadeIn(step1_group, shift=UP*0.15))
-        self.wait(2.0)
-        
-        # Bottom Zone: Equations (Step 2)
-        self.play(FadeOut(step1_group, shift=DOWN*0.1))
-        
-        step2_title = Text('ข. หาความเร็วชนพื้น (v)', font='TH Sarabun New', font_size=26, color=GOLD_B)
-        eq3 = MathTex(r'v_x = 200\\,\\mathrm{m/s},\\quad v_y = gt = 200\\,\\mathrm{m/s}', font_size=26, color=WHITE)
-        eq4 = MathTex(r'v = \\sqrt{v_x^2 + v_y^2} = \\sqrt{200^2 + 200^2}', font_size=26, color=WHITE)
-        eq5 = MathTex(r'v = 200\\sqrt{2}\\,\\mathrm{m/s}', font_size=26, color=GREEN_C)
-        
-        step2_group = VGroup(step2_title, eq3, eq4, eq5).arrange(DOWN, aligned_edge=LEFT, buff=0.2)
+
+        self.play(Write(step1_title))
+        self.play(Write(eq1_1))
+        self.wait(0.5)
+        self.play(Write(eq1_2))
+        self.wait(1.5)
+
+        # Bottom Zone Content (Step 2)
+        self.play(FadeOut(step1_group))
+
+        step2_title = Text('ข. หาอัตราเร็วขณะกระทบพื้น (v)', font='TH Sarabun New', font_size=26, color=BLUE_C)
+        eq2_1 = MathTex(r'v_x = u_x = 200\,\mathrm{m/s}', font_size=24, color=WHITE)
+        eq2_2 = MathTex(r'v_y = u_y + gt = 0 + 10(20) = 200\,\mathrm{m/s}', font_size=24, color=WHITE)
+        eq2_3 = MathTex(r'v = \sqrt{v_x^2 + v_y^2} = \sqrt{200^2 + 200^2} = 200\sqrt{2}\,\mathrm{m/s}', font_size=24, color=GREEN_C)
+
+        step2_group = VGroup(step2_title, eq2_1, eq2_2, eq2_3).arrange(DOWN, aligned_edge=LEFT, buff=0.2)
         step2_group.scale_to_fit_width(frame_width * 0.88)
         step2_group.scale_to_fit_height(bottom_zone_height * 0.88)
         step2_group.move_to(bottom_center)
-        
-        self.play(FadeIn(step2_group, shift=UP*0.15))
+
+        self.play(Write(step2_title))
+        self.play(Write(eq2_1))
+        self.play(Write(eq2_2))
+        self.wait(0.5)
+        self.play(Write(eq2_3))
         self.wait(2.0)

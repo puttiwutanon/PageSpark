@@ -14,9 +14,9 @@ from typing import List, Optional
 from firebase_admin import credentials, firestore, auth
  
 from app.core.prompts import LESSON_SUMMARY_SYSTEM_INSTRUCTION, QUIZ_GENERATION_SYSTEM_INSTRUCTION
-from app.services.manim_engine import Manim_Engine
 from app.services.code_validator import validate_episode_count
 from app.api.videos import router as videos_router
+from app.services.manim_engine import smart_json_sanitize, Manim_Engine
 
 import re
 import json
@@ -284,10 +284,16 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
             lesson_json = json.loads(raw_json)
             logger.info(f"✅ Generated JSON with {len(lesson_json.get('episodes', []))} episodes")
         except json.JSONDecodeError as e:
-            logger.warning(f"⚠️ JSON decode error, attempting fix: {e}")
-            fixed_raw = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw_json)
-            lesson_json = json.loads(fixed_raw)
-            logger.info("✅ Fixed JSON successfully")
+            logger.warning(f"⚠️ JSON decode error, attempting smart_json_sanitize: {e}")
+            try:
+                sanitized = smart_json_sanitize(raw_json)
+                lesson_json = json.loads(sanitized)
+                logger.info("✅ Fixed JSON with smart_json_sanitize successfully")
+            except json.JSONDecodeError as e2:
+                logger.warning(f"⚠️ smart_json_sanitize still failed ({e2}), trying aggressive fallback...")
+                fixed_raw = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', sanitized)
+                lesson_json = json.loads(fixed_raw)
+                logger.info("✅ Fixed JSON with aggressive fallback successfully")
 
         # ── Step 3: Enforce episode count ────────────────────────────────────
         logger.info(f"📊 Step 3: Enforcing episode count (expected={expected_count})...")

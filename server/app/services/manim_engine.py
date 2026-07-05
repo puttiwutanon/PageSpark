@@ -22,62 +22,48 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 2  # Keep at 2 to avoid API exhaustion
+MAX_RETRIES = 1  # Lowered from 2: now that code_validator.py's false-positive
+                  # violations (BOTTOM_ZONE_EMPTY, MISSING_SCALING, MATH_SQRT_WRONG)
+                  # are fixed, most episodes need 0 fix calls, so 2 total attempts
+                  # (this value + 1) is enough headroom for genuine bugs while
+                  # capping worst-case Gemini quota usage per episode.
 
 
 def _quality_check(self, code_lines: list[str]) -> tuple[bool, list[str]]:
     """
     Run a quick quality check on the generated code.
-    Returns (is_acceptable, issues_list)
-    This runs BEFORE any API calls to save quota.
+    Returns (is_acceptable, issues_list).
+
+    IMPORTANT: This runs AFTER preprocess_code() auto-fixes have already
+    been applied, so backslashes in MathTex r-strings are already
+    single-escaped (e.g. r'\frac', not r'\\frac'). All pattern checks
+    here must match the POST-fix state of the code.
+
+    Keep this check MINIMAL — only flag things that will definitely cause
+    a hard crash or completely silent/wrong output. False positives here
+    are worse than false negatives: a false positive blocks a perfectly
+    valid render entirely.
     """
     issues = []
-    
-    # Check for common issues
     code_str = "\n".join(code_lines)
-    
-    # Check for correct scaling
-    if 'scale_to_fit_width' not in code_str:
-        issues.append("Missing scale_to_fit_width")
-    
-    # Check for correct font sizes
-    import re
-    font_sizes = re.findall(r'font_size\s*=\s*(\d+)', code_str)
-    for size in font_sizes:
-        if int(size) > 28:
-            issues.append(f"font_size={size} exceeds 28")
-    
-    # Check for math errors
-    if '\\\\equiv' in code_str:
-        issues.append("Using \\equiv instead of =")
-    
-    if 'sqrt{200^2 + 200^2}' in code_str and '200\\\\sqrt{2}' not in code_str:
-        issues.append("Incorrect sqrt(200²+200²) calculation")
-    
-    # Check for Thai in MathTex
-    thai_pattern = re.compile(r'MathTex\([^)]*[\u0E00-\u0E7F]')
-    if thai_pattern.search(code_str):
+
+    # ── Check 1: Thai in MathTex (hard crash / garbled output) ──────────
+    # This is a genuine hard error: LaTeX cannot render Thai characters.
+    thai_in_mathtex = re.compile(
+        r'MathTex\s*\([^)]*[\u0E00-\u0E7F]'
+    )
+    if thai_in_mathtex.search(code_str):
         issues.append("Thai characters found in MathTex()")
-    
-    # Check for LaTeX in Text
-    latex_pattern = re.compile(r'Text\([^)]*\\\\(?:frac|sqrt|lambda|phi|theta)')
-    if latex_pattern.search(code_str):
-        issues.append("LaTeX commands found in Text()")
-    
-    # Check for VGroup without scaling in bottom zone
-    if 'bottom_center' in code_str:
-        vgroup_pattern = re.compile(r'(\w+)\s*=\s*VGroup\(')
-        vgroups = vgroup_pattern.findall(code_str)
-        for vg in vgroups:
-            if f'{vg}.scale_to_fit_width' not in code_str and f'{vg}.scale_to_fit_height' not in code_str:
-                if 'axes' not in vg.lower():  # Axes don't need scaling
-                    issues.append(f"VGroup '{vg}' missing scaling")
-    
-    # Check if bottom zone has enough content (at least 2 steps)
-    step_count = len(re.findall(r'step\d+_title', code_str))
-    if step_count < 2:
-        issues.append(f"Only {step_count} step(s) found - should have at least 2")
-    
+
+    # ── Check 2: LaTeX commands in Text() (hard crash) ───────────────────
+    # Only flag the truly unrenderable structural LaTeX like \frac, \sqrt.
+    # Single Greek letters (handled by unicode auto-fix) are NOT flagged.
+    latex_in_text = re.compile(
+        r'Text\s*\([^)]*\\(?:frac|sqrt|sum|int|prod|lim|partial)'
+    )
+    if latex_in_text.search(code_str):
+        issues.append("Complex LaTeX commands (\\frac, \\sqrt etc.) found in Text()")
+
     return len(issues) == 0, issues
 
 
@@ -303,6 +289,26 @@ class Manim_Engine:
         
         return path
 
+    @staticmethod
+    def _extract_meaningful_error(raw_output: str, tail_chars: int = 3000) -> str:
+        """
+        Manim's stderr on failure is usually dominated by tqdm progress-bar
+        spam (repeated "\\rAnimation N: ...%|...|..." lines), which buries
+        the actual Python traceback further down. Truncating from the FRONT
+        (the old behavior) only ever shows progress-bar noise -- never the
+        real error -- both in logs and in what gets sent to Gemini for
+        auto-fixing. This pulls out the real traceback if one is present,
+        and otherwise falls back to the tail of the output (tqdm always
+        finishes printing before the real error, so the tail is far more
+        informative than the head).
+        """
+        if not raw_output:
+            return raw_output
+        marker_idx = raw_output.rfind("Traceback (most recent call last)")
+        if marker_idx != -1:
+            return raw_output[marker_idx:][:tail_chars]
+        return raw_output[-tail_chars:] if len(raw_output) > tail_chars else raw_output
+
     def _run_manim(self, filepath: str) -> tuple[bool, str]:
         cmd = ["manim", "-ql", filepath, "PhysicsScene", "--media_dir", self.output_dir]
         logger.info(f"🎬 Running manim command: {' '.join(cmd)}")
@@ -325,10 +331,17 @@ class Manim_Engine:
             return True, output
             
         except subprocess.CalledProcessError as exc:
-            error_output = exc.stderr or exc.stdout or ""
+            raw_error_output = exc.stderr or exc.stdout or ""
             logger.error(f"❌ Manim render failed with error code {exc.returncode}")
-            logger.error(f"Error output: {error_output[:500]}")
-            return False, error_output
+            meaningful_error = self._extract_meaningful_error(raw_error_output)
+            logger.error(f"Error output (extracted, {len(meaningful_error)} chars): {meaningful_error}")
+            # Return the extracted/meaningful portion (not the full raw
+            # output) so downstream consumers -- the warning log in
+            # render_episode() and the Gemini fix-prompt in
+            # _ask_gemini_to_fix() -- see the real traceback instead of
+            # having it pushed out by leading progress-bar spam when they
+            # truncate to their own character limits.
+            return False, meaningful_error
         except subprocess.TimeoutExpired:
             logger.error("❌ Manim render timed out after 300 seconds.")
             return False, "Render timed out after 300 seconds."
