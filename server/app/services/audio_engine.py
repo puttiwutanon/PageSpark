@@ -20,6 +20,7 @@ import asyncio
 import os
 import math
 import logging
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -43,6 +44,26 @@ TTS_VOLUME = "+0%"   # normal volume
 
 FRAME_RATE = 60      # must match Manim config.frame_rate
 
+# Check if ffmpeg is available
+def check_ffmpeg():
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+if not check_ffmpeg():
+    # Try common ffmpeg paths
+    common_paths = [
+        r'C:\ffmpeg\bin\ffmpeg.exe',
+        r'C:\Program Files\ffmpeg\bin\ffmpeg.exe',
+        r'C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe',
+    ]
+    for path in common_paths:
+        if os.path.exists(path):
+            os.environ['PATH'] = os.environ['PATH'] + os.pathsep + os.path.dirname(path)
+            os.environ['IMAGEIO_FFMPEG_EXE'] = path
+            break
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers

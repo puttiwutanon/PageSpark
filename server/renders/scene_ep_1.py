@@ -28,107 +28,77 @@ class PhysicsScene(Scene):
         middle_center = np.array([0, middle_zone_center_y, 0])
         bottom_center = np.array([0, bottom_zone_center_y, 0])
 
-        # Top Zone Content
-        title = Text('โพรเจกไทล์แนวราบ: หาอัตราเร็วต้น', font='TH Sarabun New', font_size=28, color=GOLD_B)
-        problem_text = VGroup(
-            Text('ขว้างวัตถุแนวราบจากที่สูง 80 m ตกห่างจากตึก 20 m', font='TH Sarabun New', font_size=22, color=GRAY_A),
-            Text('จงหาอัตราเร็วต้นในแนวราบ (u_x)', font='TH Sarabun New', font_size=22, color=GRAY_A)
-        ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
-        top_group = VGroup(title, problem_text).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        # Top Zone: Title & Problem
+        title = Text('โจทย์ข้อ 12: หาค่าน้ำหนัก W ในสภาพสมดุล', font='TH Sarabun New', font_size=28, color=GOLD_B)
+        problem_desc = Text('ระบบเชือกสมดุล มีมวลซ้าย 60 N แขวนอยู่ จงหาค่าน้ำหนัก W', font='TH Sarabun New', font_size=22, color=GRAY_A)
+        top_group = VGroup(title, problem_desc).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
         top_group.scale_to_fit_width(frame_width * 0.88)
         top_group.move_to(top_center)
         self.play(FadeIn(top_group, shift=UP*0.15))
-
-        # Middle Zone Content (Visualization)
-        axes = Axes(
-            x_range=[0, 25, 5],
-            y_range=[0, 90, 10],
-            x_length=frame_width * 0.60,
-            y_length=middle_zone_height * 0.65,
-            axis_config={
-                'color': GRAY_C,
-                'stroke_width': 2,
-                'include_tip': True,
-                'tip_length': 0.15,
-                'tip_width': 0.10,
-            }
-        )
-        x_label = axes.get_x_axis_label(
-            Text('ระยะทางแนวราบ (m)', font='TH Sarabun New', font_size=16, color=GRAY_A),
-            edge=DOWN, direction=DOWN, buff=0.3
-        )
-        y_label = axes.get_y_axis_label(
-            Text('ความสูง (m)', font='TH Sarabun New', font_size=16, color=GRAY_A).rotate(90 * DEGREES),
-            edge=LEFT, direction=LEFT, buff=0.3
-        )
-
-        def traj_func(t):
-            return axes.coords_to_point(5 * t, 80 - 5 * (t**2))
-
-        trajectory = ParametricFunction(traj_func, t_range=[0, 4], color=TEAL_C, stroke_width=4)
-        start_dot = Dot(axes.coords_to_point(0, 80), color=BLUE_C, radius=0.08)
-        end_dot = Dot(axes.coords_to_point(20, 0), color=RED_C, radius=0.08)
-
-        start_label = Text('จุดปล่อย (y = 80 m)', font='TH Sarabun New', font_size=14, color=BLUE_C).next_to(start_dot, RIGHT, buff=0.1)
-        end_label = Text('จุดตก (x = 20 m)', font='TH Sarabun New', font_size=14, color=RED_C).next_to(end_dot, UP, buff=0.1)
-
-        v_vector = Arrow(
-            start=axes.coords_to_point(0, 80),
-            end=axes.coords_to_point(5, 80),
-            buff=0,
-            color=YELLOW_C,
-            stroke_width=3,
-            max_tip_length_to_length_ratio=0.25
-        )
-        v_vector_label = MathTex(r'u_x', font_size=18, color=YELLOW_C).next_to(v_vector, UP, buff=0.05)
-
-        axes_group = VGroup(axes, x_label, y_label, trajectory, start_dot, end_dot, start_label, end_label, v_vector, v_vector_label)
-        axes_group.scale_to_fit_width(frame_width * 0.88)
-        axes_group.scale_to_fit_height(middle_zone_height * 0.82)
-        axes_group.move_to(middle_center)
-
-        self.play(Create(axes), Write(x_label), Write(y_label))
-        self.play(FadeIn(start_dot), FadeIn(start_label))
-        self.play(Create(v_vector), Write(v_vector_label))
-        self.play(Create(trajectory, run_time=2), FadeIn(end_dot), FadeIn(end_label))
         self.wait(0.8)
 
-        # Bottom Zone Content (Step 1)
-        step1_title = Text('ขั้นตอนที่ 1: หาเวลาจากแนวดิ่ง (s_y = 80 m)', font='TH Sarabun New', font_size=26, color=BLUE_C)
-        eq1_1 = MathTex(r's_y = u_y t + \frac{1}{2} g t^2', font_size=26, color=WHITE)
-        eq1_2 = MathTex(r'80 = 0 + \frac{1}{2}(10)t^2', font_size=26, color=WHITE)
-        eq1_3 = MathTex(r'5t^2 = 80 \\implies t^2 = 16 \\implies t = 4\,\mathrm{s}', font_size=26, color=GREEN_C)
+        # Middle Zone: Force Diagram
+        j1 = np.array([-1.5, middle_zone_center_y, 0])
+        j2 = np.array([1.5, middle_zone_center_y, 0])
+        
+        f1_dir = np.array([-np.cos(np.radians(37)), np.sin(np.radians(37)), 0])
+        arrow_t1 = Arrow(j1, j1 + f1_dir * 1.5, color=BLUE_C, buff=0, stroke_width=4)
+        arrow_t2 = Arrow(j1, j2, color=GREEN_C, buff=0, stroke_width=4)
+        arrow_w1 = Arrow(j1, j1 + DOWN * 1.5, color=RED_C, buff=0, stroke_width=4)
+        
+        f3_dir = np.array([np.cos(np.radians(53)), np.sin(np.radians(53)), 0])
+        arrow_t3 = Arrow(j2, j2 + f3_dir * 1.5, color=ORANGE, buff=0, stroke_width=4)
+        arrow_w2 = Arrow(j2, j2 + DOWN * 1.5, color=YELLOW_C, buff=0, stroke_width=4)
+        
+        label_t1 = MathTex(r'T_1', font_size=18, color=BLUE_C).next_to(j1 + f1_dir * 1.5, UP, buff=0.1)
+        label_t2 = MathTex(r'T_2', font_size=18, color=GREEN_C).next_to((j1+j2)/2, UP, buff=0.1)
+        label_w1 = MathTex(r'60\,\mathrm{N}', font_size=18, color=RED_C).next_to(j1 + DOWN * 1.5, DOWN, buff=0.1)
+        label_t3 = MathTex(r'T_3', font_size=18, color=ORANGE).next_to(j2 + f3_dir * 1.5, UP, buff=0.1)
+        label_w2 = MathTex(r'W', font_size=18, color=YELLOW_C).next_to(j2 + DOWN * 1.5, DOWN, buff=0.1)
+        
+        arc1 = Arc(radius=0.4, start_angle=np.pi, angle=np.radians(37), arc_center=j1, color=GRAY_B)
+        label_theta1 = MathTex(r'37^{\circ}', font_size=14, color=GRAY_B).next_to(arc1, UP+LEFT, buff=0.05)
+        
+        arc2 = Arc(radius=0.4, start_angle=0, angle=np.radians(53), arc_center=j2, color=GRAY_B)
+        label_theta2 = MathTex(r'53^{\circ}', font_size=14, color=GRAY_B).next_to(arc2, UP+RIGHT, buff=0.05)
 
+        diagram_group = VGroup(
+            arrow_t1, arrow_t2, arrow_w1, arrow_t3, arrow_w2,
+            label_t1, label_t2, label_w1, label_t3, label_w2,
+            arc1, label_theta1, arc2, label_theta2
+        )
+        diagram_group.scale_to_fit_width(frame_width * 0.85)
+        diagram_group.scale_to_fit_height(middle_zone_height * 0.82)
+        diagram_group.move_to(middle_center)
+        
+        self.play(Create(diagram_group))
+        self.wait(0.8)
+
+        # Bottom Zone: Step-by-step solving
+        step1_title = Text('ขั้นตอนที่ 1: คิดที่จุดเชื่อมต่อซ้าย', font='TH Sarabun New', font_size=26, color=BLUE_C)
+        eq1_1 = MathTex(r'\Sigma F_y = 0 \Rightarrow T_1 \sin 37^{\circ} = 60', font_size=26, color=WHITE)
+        eq1_2 = MathTex(r'T_1 = \frac{60}{\sin 37^{\circ}} = 100\,\mathrm{N}', font_size=26, color=WHITE)
+        eq1_3 = MathTex(r'T_2 = T_1 \cos 37^{\circ} = 100(0.8) = 80\,\mathrm{N}', font_size=26, color=GREEN_C)
+        
         step1_group = VGroup(step1_title, eq1_1, eq1_2, eq1_3).arrange(DOWN, aligned_edge=LEFT, buff=0.2)
         step1_group.scale_to_fit_width(frame_width * 0.88)
         step1_group.scale_to_fit_height(bottom_zone_height * 0.88)
         step1_group.move_to(bottom_center)
-
-        self.play(Write(step1_title))
-        self.play(Write(eq1_1))
-        self.wait(0.5)
-        self.play(Write(eq1_2))
-        self.wait(0.5)
-        self.play(Write(eq1_3))
+        
+        self.play(Write(step1_group))
         self.wait(1.5)
-
-        # Bottom Zone Content (Step 2)
-        self.play(FadeOut(step1_group))
-
-        step2_title = Text('ขั้นตอนที่ 2: หาอัตราเร็วแนวราบ (s_x = 20 m)', font='TH Sarabun New', font_size=26, color=BLUE_C)
-        eq2_1 = MathTex(r's_x = u_x t', font_size=26, color=WHITE)
-        eq2_2 = MathTex(r'20 = u_x (4)', font_size=26, color=WHITE)
-        eq2_3 = MathTex(r'u_x = \frac{20}{4} = 5\,\mathrm{m/s}', font_size=26, color=GREEN_C)
-
+        
+        self.play(FadeOut(step1_group, shift=DOWN*0.1))
+        
+        step2_title = Text('ขั้นตอนที่ 2: คิดที่จุดเชื่อมต่อขวา', font='TH Sarabun New', font_size=26, color=ORANGE)
+        eq2_1 = MathTex(r'\Sigma F_x = 0 \Rightarrow T_3 \cos 53^{\circ} = T_2 = 80', font_size=26, color=WHITE)
+        eq2_2 = MathTex(r'T_3 = \frac{80}{\cos 53^{\circ}} = \frac{400}{3}\,\mathrm{N}', font_size=26, color=WHITE)
+        eq2_3 = MathTex(r'W = T_3 \sin 53^{\circ} = \frac{400}{3}(0.8) \approx 106.67\,\mathrm{N}', font_size=26, color=YELLOW_C)
+        
         step2_group = VGroup(step2_title, eq2_1, eq2_2, eq2_3).arrange(DOWN, aligned_edge=LEFT, buff=0.2)
         step2_group.scale_to_fit_width(frame_width * 0.88)
         step2_group.scale_to_fit_height(bottom_zone_height * 0.88)
         step2_group.move_to(bottom_center)
-
-        self.play(Write(step2_title))
-        self.play(Write(eq2_1))
-        self.wait(0.5)
-        self.play(Write(eq2_2))
-        self.wait(0.5)
-        self.play(Write(eq2_3))
+        
+        self.play(Write(step2_group))
         self.wait(2.0)

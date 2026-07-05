@@ -3,6 +3,10 @@ server/app/main.py
 """
 import os
 import tempfile
+import re  # IMPORT re at the top
+import json
+import logging
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -17,10 +21,6 @@ from app.core.prompts import LESSON_SUMMARY_SYSTEM_INSTRUCTION, QUIZ_GENERATION_
 from app.services.code_validator import validate_episode_count
 from app.api.videos import router as videos_router
 from app.services.manim_engine import smart_json_sanitize, Manim_Engine
-
-import re
-import json
-import logging
 
 # Enhanced logging configuration
 logging.basicConfig(
@@ -51,7 +51,7 @@ app.include_router(videos_router)
 client = genai.Client()
 engine = Manim_Engine(output_dir="renders")
 
-# Topic mapper (keep your existing one)
+# Topic mapper
 TOPIC_MAPPER = {
     'mechanics_1': 'กลศาสตร์ 1 (การเคลื่อนที่แนวตรง, นิวตัน, สมดุลกล)',
     'mechanics_2': 'กลศาสตร์ 2 (งานและพลังงาน, โมเมนตัม, การเคลื่อนที่แนวโค้ง)',
@@ -61,12 +61,11 @@ TOPIC_MAPPER = {
     'modern_physics': 'ฟิสิกส์อะตอม, นิวเคลียร์ และฟิสิกส์อนุภาค'
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Pydantic Schemas (keep your existing ones)
-# ─────────────────────────────────────────────────────────────────────────────
+
 class QuizRequest(BaseModel):
     topics: List[str]
     questions_per_topic: int = 5
+
 
 class QuizItemSchema(BaseModel):
     question: str
@@ -74,12 +73,10 @@ class QuizItemSchema(BaseModel):
     correct_answer: str
     step_by_step_solution: str
 
+
 class QuizResponseSchema(BaseModel):
     quizzes: List[QuizItemSchema]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Endpoints (keep your existing ones)
-# ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/api/generate-quiz", response_model=QuizResponseSchema)
 async def generate_quiz(request: QuizRequest):
@@ -131,14 +128,7 @@ async def ingest_and_summarize(
     uid: str = Query("anonymous", description="User ID for video uploads"),
     lesson_id: Optional[str] = Query(None, description="Lesson ID for grouping videos"),
 ):
-    """
-    Ingest a textbook page image/PDF and return a lesson summary JSON.
-    
-    By default, this is SUMMARY-ONLY (no video rendering).
-    
-    To also render videos and upload to Cloudinary, pass ?render=true:
-    POST /api/ingest?render=true&uid=test_user&lesson_id=lesson_001
-    """
+    """Ingest a textbook page image/PDF and return a lesson summary JSON."""
     logger.info("=" * 60)
     logger.info(f"📥 /api/ingest called")
     logger.info(f"   file: {file.filename}")
@@ -150,7 +140,6 @@ async def ingest_and_summarize(
         logger.info("🔄 render=True detected — delegating to full video generation pipeline...")
         return await generate_video(file=file, uid=uid, lesson_id=lesson_id)
     
-    # Summary-only mode
     temp_path = ""
     gemini_file = None
 
@@ -224,6 +213,9 @@ async def generate_video(
         # ── Step 1: Pre-scan to count questions ─────────────────────────────
         logger.info("🔍 Step 1: Pre-scanning for question count...")
         gemini_file_for_count = client.files.upload(file=temp_path)
+        expected_count = 1
+        question_titles = []
+        
         try:
             count_response = client.models.generate_content(
                 model='gemini-3.5-flash',
@@ -236,6 +228,7 @@ async def generate_video(
                 config=types.GenerateContentConfig(temperature=0.1),
             )
             raw_count = count_response.text.strip()
+            # Remove markdown code blocks
             raw_count = re.sub(r"^```(?:json)?\s*", "", raw_count)
             raw_count = re.sub(r"\s*```$", "", raw_count)
             count_data = json.loads(raw_count)
@@ -280,20 +273,42 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
         raw_json = re.sub(r"^```(?:json)?\s*", "", raw_json)
         raw_json = re.sub(r"\s*```$", "", raw_json)
 
+        # Try multiple JSON parsing strategies
+        lesson_json = None
+        parse_errors = []
+
+        # Strategy 1: Direct parse
         try:
             lesson_json = json.loads(raw_json)
             logger.info(f"✅ Generated JSON with {len(lesson_json.get('episodes', []))} episodes")
         except json.JSONDecodeError as e:
+            parse_errors.append(f"Direct parse: {e}")
             logger.warning(f"⚠️ JSON decode error, attempting smart_json_sanitize: {e}")
+            
+            # Strategy 2: Smart sanitize
             try:
                 sanitized = smart_json_sanitize(raw_json)
                 lesson_json = json.loads(sanitized)
                 logger.info("✅ Fixed JSON with smart_json_sanitize successfully")
             except json.JSONDecodeError as e2:
-                logger.warning(f"⚠️ smart_json_sanitize still failed ({e2}), trying aggressive fallback...")
-                fixed_raw = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', sanitized)
-                lesson_json = json.loads(fixed_raw)
-                logger.info("✅ Fixed JSON with aggressive fallback successfully")
+                parse_errors.append(f"Smart sanitize: {e2}")
+                logger.warning(f"⚠️ smart_json_sanitize still failed, trying aggressive fallback...")
+                
+                # Strategy 3: Aggressive fallback - fix all backslashes
+                try:
+                    # Fix all backslashes in the JSON
+                    fixed_raw = raw_json
+                    # Double all backslashes that aren't already doubled
+                    fixed_raw = re.sub(r'(?<!\\)\\(?!["\\/bfnrtu])', r'\\\\', fixed_raw)
+                    # Fix trailing commas
+                    fixed_raw = re.sub(r',\s*}', '}', fixed_raw)
+                    fixed_raw = re.sub(r',\s*]', ']', fixed_raw)
+                    lesson_json = json.loads(fixed_raw)
+                    logger.info("✅ Fixed JSON with aggressive backslash escaping")
+                except json.JSONDecodeError as e3:
+                    parse_errors.append(f"Aggressive fallback: {e3}")
+                    logger.error(f"❌ All JSON parsing strategies failed: {parse_errors}")
+                    raise HTTPException(status_code=500, detail=f"JSON parsing failed: {parse_errors}")
 
         # ── Step 3: Enforce episode count ────────────────────────────────────
         logger.info(f"📊 Step 3: Enforcing episode count (expected={expected_count})...")
@@ -315,7 +330,7 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
 
         # ── Step 4: Render all episodes ──────────────────────────────────────
         logger.info(f"🎬 Step 4: Rendering {len(lesson_json.get('episodes', []))} episodes...")
-        render_results = engine.render_all_episodes(lesson_json, uid=uid, lesson_id=lesson_id)
+        render_results = await engine.render_all_episodes(lesson_json, uid=uid, lesson_id=lesson_id)
 
         # Log final results
         logger.info("=" * 60)
@@ -356,7 +371,6 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
                 pass
 
 
-# ── Health Check and Firebase Test ─────────────────────────────────────────────
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint."""
@@ -368,7 +382,6 @@ async def test_firebase():
     """Test if Firebase is properly configured."""
     try:
         from app.storage.firebase_client import db
-        # Test Firestore
         test_ref = db.collection("test").document("test")
         test_ref.set({"test": "success", "timestamp": firestore.SERVER_TIMESTAMP})
         test_ref.delete()

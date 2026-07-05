@@ -10,8 +10,9 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 from app.services.code_validator import preprocess_code
+from app.services.audio_engine import AudioEngine
+from app.services.video_engine import VideoEngine
 from app.storage.cloudinary_storage import upload_episode_video
-from pydantic import BaseModel
 
 load_dotenv()
 
@@ -22,42 +23,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 1  # Lowered from 2: now that code_validator.py's false-positive
-                  # violations (BOTTOM_ZONE_EMPTY, MISSING_SCALING, MATH_SQRT_WRONG)
-                  # are fixed, most episodes need 0 fix calls, so 2 total attempts
-                  # (this value + 1) is enough headroom for genuine bugs while
-                  # capping worst-case Gemini quota usage per episode.
+MAX_RETRIES = 1
 
 
 def _quality_check(self, code_lines: list[str]) -> tuple[bool, list[str]]:
-    """
-    Run a quick quality check on the generated code.
-    Returns (is_acceptable, issues_list).
-
-    IMPORTANT: This runs AFTER preprocess_code() auto-fixes have already
-    been applied, so backslashes in MathTex r-strings are already
-    single-escaped (e.g. r'\frac', not r'\\frac'). All pattern checks
-    here must match the POST-fix state of the code.
-
-    Keep this check MINIMAL — only flag things that will definitely cause
-    a hard crash or completely silent/wrong output. False positives here
-    are worse than false negatives: a false positive blocks a perfectly
-    valid render entirely.
-    """
+    """Run a quick quality check on the generated code."""
     issues = []
     code_str = "\n".join(code_lines)
 
-    # ── Check 1: Thai in MathTex (hard crash / garbled output) ──────────
-    # This is a genuine hard error: LaTeX cannot render Thai characters.
     thai_in_mathtex = re.compile(
         r'MathTex\s*\([^)]*[\u0E00-\u0E7F]'
     )
     if thai_in_mathtex.search(code_str):
         issues.append("Thai characters found in MathTex()")
 
-    # ── Check 2: LaTeX commands in Text() (hard crash) ───────────────────
-    # Only flag the truly unrenderable structural LaTeX like \frac, \sqrt.
-    # Single Greek letters (handled by unicode auto-fix) are NOT flagged.
     latex_in_text = re.compile(
         r'Text\s*\([^)]*\\(?:frac|sqrt|sum|int|prod|lim|partial)'
     )
@@ -70,45 +49,100 @@ def _quality_check(self, code_lines: list[str]) -> tuple[bool, list[str]]:
 def smart_json_sanitize(raw: str) -> str:
     """
     Robust JSON sanitizer for Gemini responses that contain Manim/Python code.
-
-    Problem: Gemini embeds Python code in JSON strings. LaTeX backslash sequences
-    like \\frac, \\lambda create invalid JSON escapes:
-      - \\f: JSON treats this as form feed (valid!) then "rac{..." is orphaned
-      - \\l: JSON treats this as invalid escape → JSONDecodeError
-      - \\t: JSON treats this as tab (valid!) then "heta" is orphaned
-
-    Strategy:
-      1. Protect already-doubled backslashes (\\\\ → placeholder)
-      2. Protect valid \\uXXXX unicode escapes (\\u0e02 etc.)
-      3. Double all remaining single backslashes
-      4. Restore protected sequences
-
-    This handles BOTH cases:
-      - Gemini outputs single \\ (wrong): \frac → \\frac ✓
-      - Gemini outputs double \\\\ (correct): \\frac → \\frac (unchanged) ✓
+    
+    Handles:
+    1. Invalid backslash escapes in JSON strings
+    2. Unescaped quotes inside strings
+    3. Trailing commas
+    4. Missing quotes around keys
     """
-    DB_PLACEHOLDER = '\x00__DB__\x00'   # for already-doubled backslashes
-    UNI_PLACEHOLDER = '\x00__UNI__\x00'  # for \\uXXXX sequences
-
-    # Step 1: protect already-doubled backslashes (\\\\ in raw string = \\ in JSON)
+    import re
+    
+    # First, try to extract just the JSON part if there's extra text
+    # Look for { ... } pattern
+    json_match = re.search(r'\{[^{}]*"episodes"[\s\S]*\}', raw)
+    if json_match:
+        raw = json_match.group(0)
+    
+    # Step 1: Protect already-doubled backslashes
+    DB_PLACEHOLDER = '\x00__DB__\x00'
+    UNI_PLACEHOLDER = '\x00__UNI__\x00'
+    
     raw = raw.replace('\\\\', DB_PLACEHOLDER)
-
-    # Step 2: protect valid \\uXXXX unicode escapes (which are now \\u after step 1)
-    # After step 1, any \\uXXXX that was originally \uXXXX is now just \uXXXX
-    # We need to protect those
+    
+    # Step 2: Protect valid \\uXXXX unicode escapes
     raw = re.sub(
         r'\\u[0-9a-fA-F]{4}',
-        lambda m: UNI_PLACEHOLDER + m.group(0)[2:],  # store the 4 hex chars
+        lambda m: UNI_PLACEHOLDER + m.group(0)[2:],
         raw
     )
-
-    # Step 3: double all remaining single backslashes
-    raw = raw.replace('\\', '\\\\')
-
-    # Step 4: restore
+    
+    # Step 3: Fix common LaTeX backslash issues in strings
+    # This is the key fix - handle \frac, \sin, \cos, etc.
+    # We need to double all backslashes that are part of LaTeX commands
+    
+    # Find all string content in the JSON
+    def fix_string_content(match):
+        content = match.group(0)
+        # Double backslashes that are part of LaTeX commands
+        # but only if they're not already doubled
+        latex_commands = [
+            'frac', 'sqrt', 'sin', 'cos', 'tan', 'log', 'ln',
+            'lambda', 'phi', 'theta', 'alpha', 'beta', 'gamma',
+            'delta', 'epsilon', 'zeta', 'eta', 'iota', 'kappa',
+            'mu', 'nu', 'xi', 'pi', 'rho', 'sigma', 'tau',
+            'upsilon', 'chi', 'psi', 'omega', 'Gamma', 'Delta',
+            'Theta', 'Lambda', 'Xi', 'Pi', 'Sigma', 'Phi',
+            'Psi', 'Omega', 'mathrm', 'mathbf', 'textit',
+            'text', 'widehat', 'widetilde', 'rightarrow',
+            'leftarrow', 'Rightarrow', 'Leftarrow', 'left',
+            'right', 'cdot', 'times', 'pm', 'mp', 'leq', 'geq',
+            'neq', 'approx', 'equiv', 'infty', 'partial',
+            'sum', 'prod', 'int', 'iint', 'iiint', 'oint',
+        ]
+        
+        # Don't modify if it's already properly escaped
+        if '\\\\' in content:
+            return content
+        
+        # Double backslashes before known LaTeX commands
+        for cmd in latex_commands:
+            content = content.replace(f'\\{cmd}', f'\\\\{cmd}')
+        
+        # Fix spacing commands
+        content = content.replace('\\,', '\\\\,')
+        content = content.replace('\\;', '\\\\;')
+        content = content.replace('\\!', '\\\\!')
+        
+        # Fix \circ
+        content = content.replace('\\circ', '\\\\circ')
+        
+        return content
+    
+    # Find and fix all string content in the JSON
+    # This handles both double-quoted and single-quoted strings
+    pattern = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
+    raw = pattern.sub(lambda m: f'"{fix_string_content(m.group(1))}"', raw)
+    
+    # Also handle single-quoted strings in Python code
+    pattern2 = re.compile(r"'([^'\\]*(?:\\.[^'\\]*)*)'")
+    raw = pattern2.sub(lambda m: f"'{fix_string_content(m.group(1))}'", raw)
+    
+    # Step 4: Double all remaining single backslashes that aren't already doubled
+    # But be careful not to double already-doubled ones
+    raw = re.sub(r'(?<!\\)\\(?!\\)', r'\\\\', raw)
+    
+    # Step 5: Restore protected sequences
     raw = raw.replace(DB_PLACEHOLDER, '\\\\')
     raw = raw.replace(UNI_PLACEHOLDER, '\\u')
-
+    
+    # Step 6: Fix trailing commas in arrays and objects
+    raw = re.sub(r',\s*}', '}', raw)
+    raw = re.sub(r',\s*]', ']', raw)
+    
+    # Step 7: Fix missing quotes around keys
+    raw = re.sub(r'([{,])\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', raw)
+    
     return raw
 
 
@@ -129,49 +163,32 @@ FIX_PROMPT_TEMPLATE = """
 
 ══ กฎเหล็ก — ดูตัวอย่างก่อน/หลังแล้วแก้ตามนี้เสมอ ══
 
+❌ WRONG — aligned_edge=CENTER:
+    VGroup(...).arrange(DOWN, aligned_edge=CENTER, buff=0.15)
+✅ CORRECT — ใช้ LEFT หรือ RIGHT เท่านั้น:
+    VGroup(...).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+
 ❌ WRONG — VGroup(*[...]) list comprehension:
-    lines = ['A', 'B', 'C']
     VGroup(*[Text(line, font='TH Sarabun New', font_size=26) for line in lines])
 ✅ CORRECT:
-    VGroup(
-        Text('A', font='TH Sarabun New', font_size=26, color=GRAY_A),
-        Text('B', font='TH Sarabun New', font_size=26, color=GRAY_A),
-        Text('C', font='TH Sarabun New', font_size=26, color=GRAY_A),
-    ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
+    VGroup(Text('A', ...), Text('B', ...)).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
 
 ❌ WRONG — LaTeX ใน Text():
     Text('หาความยาวคลื่น (\\lambda)', ...)
-✅ CORRECT — ใช้ unicode:
+✅ CORRECT:
     Text('หาความยาวคลื่น (λ)', font='TH Sarabun New', font_size=26, color=GOLD_B)
 
-❌ WRONG — Thai ใน MathTex() หรือ \\text{{Thai}}:
+❌ WRONG — Thai ใน MathTex():
     MathTex(r'\\text{{ระยะห่างบัพ}} = \\frac{{\\lambda}}{{2}}', ...)
-    MathTex(r'\\mathrm{{วินาที}}', ...)
-✅ CORRECT — แยก Thai ออกเป็น VGroup(Text, MathTex):
-    VGroup(
-        Text('ระยะห่างบัพ', font='TH Sarabun New', font_size=26, color=WHITE),
-        MathTex(r'= \\frac{{\\lambda}}{{2}}', font_size=26, color=WHITE),
-    ).arrange(RIGHT, buff=0.1)
+✅ CORRECT:
+    VGroup(Text('ระยะห่างบัพ', ...), MathTex(r'= \\frac{{\\lambda}}{{2}}', ...))
 
 ❌ WRONG — .move_to(scalar):
     group.move_to(bottom_zone_center_y)
 ✅ CORRECT:
-    group.move_to(bottom_center)   # or np.array([0, bottom_zone_center_y, 0])
+    group.move_to(bottom_center)
 
-❌ WRONG — .arrange(RIGHT) กับ Text ไทยยาว:
-    VGroup(Text('ก. เวลาที่วัตถุตกถึงพื้น:', ...), MathTex(...)).arrange(RIGHT)
-✅ CORRECT:
-    VGroup(Text('ก. เวลาที่วัตถุตกถึงพื้น:', ...), MathTex(...)).arrange(DOWN, aligned_edge=LEFT)
-
-กฎอื่น:
-- import numpy as np บรรทัดแรก
-- ShowCreation → Create, TexMobject → MathTex, get_graph → plot
-- ห้าม font= ใน MathTex()/Tex()
-- ห้าม include_numbers ใน axis_config
-- ทุก VGroup: scale_to_fit_width(frame_width*0.88) แล้ว move_to(zone_center)
-- MathTex ใช้ r-string: MathTex(r'\\frac{{1}}{{2}}', ...)
-
-ส่งคืนเฉพาะ JSON เท่านั้น ห้ามมีข้อความอื่น:
+ส่งคืนเฉพาะ JSON เท่านั้น:
 {{"manim_code_lines": ["import numpy as np", "from manim import *", ...]}}
 """
 
@@ -179,44 +196,25 @@ FIX_PROMPT_TEMPLATE = """
 LINE_FIX_PROMPT_TEMPLATE = """
 คุณเป็น Manim developer ที่แก้บั๊กแบบ surgical — แก้เฉพาะบรรทัดที่ระบุเท่านั้น
 
-ด้านล่างคือ "violations" ที่พบ พร้อมหมายเลขบรรทัดและบริบทรอบๆ (3 บรรทัดก่อน/หลัง)
-แต่ละ violation มี context_id กำกับไว้ — ใช้ context_id นั้นตอบกลับ
-
 {violation_blocks}
 
 ══ กฎเหล็ก — ดูตัวอย่างก่อน/หลังแล้วแก้ตามนี้เสมอ ══
 
-❌ WRONG — VGroup(*[...]) list comprehension:
-    VGroup(*[Text(line, font='TH Sarabun New', font_size=26) for line in lines])
+❌ WRONG — aligned_edge=CENTER:
+    VGroup(...).arrange(DOWN, aligned_edge=CENTER, buff=0.15)
 ✅ CORRECT:
-    VGroup(
-        Text('A', font='TH Sarabun New', font_size=26, color=GRAY_A),
-        Text('B', font='TH Sarabun New', font_size=26, color=GRAY_A),
-    ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
+    VGroup(...).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
 
 ❌ WRONG — LaTeX ใน Text(): Text('หาความยาวคลื่น (\\lambda)', ...)
-✅ CORRECT — ใช้ unicode: Text('หาความยาวคลื่น (λ)', ...)
+✅ CORRECT: Text('หาความยาวคลื่น (λ)', ...)
 
-❌ WRONG — Thai ใน MathTex(): MathTex(r'\\mathrm{{วินาที}}', ...)
-✅ CORRECT — แยก Thai ออกเป็น Text() แล้วรวมด้วย VGroup
-
-❌ WRONG — .move_to(scalar): group.move_to(bottom_zone_center_y)
-✅ CORRECT: group.move_to(np.array([0, bottom_zone_center_y, 0]))
-
-❌ WRONG — .arrange(RIGHT) กับ Text ไทยยาว (15+ ตัวอักษร)
-✅ CORRECT — .arrange(DOWN, aligned_edge=LEFT)
-
-สำหรับแต่ละ context_id ด้านบน ส่งคืนเฉพาะบรรทัดที่แก้ไขแล้ว (อาจมีจำนวนบรรทัด
-มากกว่าหรือน้อยกว่าเดิมได้ถ้าจำเป็น เช่นแยก 1 บรรทัดเป็นหลายบรรทัด) เป็น list ของ string
-
-ส่งคืนเฉพาะ JSON เท่านั้น ห้ามมีข้อความอื่น ห้ามใส่หมายเลขบรรทัดในสตริง:
+ส่งคืนเฉพาะ JSON:
 {{"fixes": {{"<context_id>": ["บรรทัดที่แก้ 1", "บรรทัดที่แก้ 2"]}}}}
 """
 
 
 COUNT_PROMPT = """
     อ่านเนื้อหาที่ผู้ใช้ส่งมาและนับจำนวนโจทย์ฟิสิกส์ที่แยกจากกันได้ทั้งหมด
-    (แต่ละโจทย์ที่มีสถานการณ์หรือตัวเลขต่างกัน นับเป็น 1 โจทย์)
     ส่งคืน JSON เท่านั้น: {"question_count": <number>, "question_titles": ["...", "..."]}
     """
 
@@ -225,6 +223,9 @@ class Manim_Engine:
     def __init__(self, output_dir: str = "renders"):
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(os.path.join(output_dir, "audio"), exist_ok=True)
+        os.makedirs(os.path.join(output_dir, "final"), exist_ok=True)
+        os.makedirs(os.path.join(output_dir, "videos"), exist_ok=True)
         self.gemini_client = genai.Client()
         logger.info(f"🚀 Manim_Engine initialized with output_dir: {output_dir}")
 
@@ -267,15 +268,10 @@ class Manim_Engine:
         return filepath, code
 
     def _resolve_rendered_mp4_path(self, scene_filepath: str) -> str:
-        """
-        manim renders to 1920p60 quality.
-        """
+        """Find the rendered MP4 file."""
         stem = os.path.splitext(os.path.basename(scene_filepath))[0]
-        
-        # Only 1920p60
         path = os.path.join(self.output_dir, "videos", stem, "1920p60", "PhysicsScene.mp4")
         
-        # If not found, try to find any PhysicsScene.mp4
         if not os.path.exists(path):
             import glob
             pattern = os.path.join(self.output_dir, "videos", "**", "PhysicsScene.mp4")
@@ -291,17 +287,7 @@ class Manim_Engine:
 
     @staticmethod
     def _extract_meaningful_error(raw_output: str, tail_chars: int = 3000) -> str:
-        """
-        Manim's stderr on failure is usually dominated by tqdm progress-bar
-        spam (repeated "\\rAnimation N: ...%|...|..." lines), which buries
-        the actual Python traceback further down. Truncating from the FRONT
-        (the old behavior) only ever shows progress-bar noise -- never the
-        real error -- both in logs and in what gets sent to Gemini for
-        auto-fixing. This pulls out the real traceback if one is present,
-        and otherwise falls back to the tail of the output (tqdm always
-        finishes printing before the real error, so the tail is far more
-        informative than the head).
-        """
+        """Extract meaningful error from manim output."""
         if not raw_output:
             return raw_output
         marker_idx = raw_output.rfind("Traceback (most recent call last)")
@@ -310,6 +296,7 @@ class Manim_Engine:
         return raw_output[-tail_chars:] if len(raw_output) > tail_chars else raw_output
 
     def _run_manim(self, filepath: str) -> tuple[bool, str]:
+        """Run manim render with -ql (low quality for faster testing)."""
         cmd = ["manim", "-ql", filepath, "PhysicsScene", "--media_dir", self.output_dir]
         logger.info(f"🎬 Running manim command: {' '.join(cmd)}")
         
@@ -317,7 +304,6 @@ class Manim_Engine:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
             output = result.stdout
             
-            # Log first few lines of output for debugging
             output_lines = output.splitlines()
             logger.info(f"📺 Manim output preview (first 10 lines):")
             for line in output_lines[:10]:
@@ -335,12 +321,6 @@ class Manim_Engine:
             logger.error(f"❌ Manim render failed with error code {exc.returncode}")
             meaningful_error = self._extract_meaningful_error(raw_error_output)
             logger.error(f"Error output (extracted, {len(meaningful_error)} chars): {meaningful_error}")
-            # Return the extracted/meaningful portion (not the full raw
-            # output) so downstream consumers -- the warning log in
-            # render_episode() and the Gemini fix-prompt in
-            # _ask_gemini_to_fix() -- see the real traceback instead of
-            # having it pushed out by leading progress-bar spam when they
-            # truncate to their own character limits.
             return False, meaningful_error
         except subprocess.TimeoutExpired:
             logger.error("❌ Manim render timed out after 300 seconds.")
@@ -352,6 +332,7 @@ class Manim_Engine:
         error_message: str,
         violation_summary: str | None = None,
     ) -> list[str] | None:
+        """Ask Gemini to fix the code."""
         logger.info("🔄 Asking Gemini for code fix...")
         
         violation_block = ""
@@ -378,18 +359,14 @@ class Manim_Engine:
                     ),
                 )
                 raw = response.text.strip()
-                # Strip markdown fences if present
                 raw = re.sub(r"^```(?:json|python)?\s*", "", raw)
                 raw = re.sub(r"\s*```$", "", raw)
-
-                # Apply smart sanitizer BEFORE json.loads
                 raw = smart_json_sanitize(raw)
 
                 try:
                     parsed = json.loads(raw)
                 except json.JSONDecodeError as e:
                     logger.error(f"Gemini fix JSON parse failed after sanitize: {e}")
-                    logger.error(f"Sanitized raw (first 300): {raw[:300]}")
                     return None
 
                 lines = parsed.get("manim_code_lines")
@@ -412,11 +389,7 @@ class Manim_Engine:
                     time.sleep(wait)
                     continue
                 if any(x in err_str for x in ["403", "PERMISSION_DENIED", "denied"]):
-                    logger.error(
-                        "Gemini API quota exhausted (403). "
-                        "Wait until midnight Pacific or add billing.\n"
-                        f"Error: {exc}"
-                    )
+                    logger.error(f"Gemini API quota exhausted (403): {exc}")
                     return None
                 logger.error(f"Gemini fix failed (non-retryable): {exc}")
                 return None
@@ -430,33 +403,17 @@ class Manim_Engine:
         violations: list,
         context_radius: int = 3,
     ) -> str | None:
-        """
-        Targeted fix: send Gemini ONLY the violating lines (plus a few lines
-        of context each) instead of the whole file, and splice the returned
-        replacement lines back into `code` locally.
-
-        Used for validator violations (which already carry an exact line
-        number per code_validator.Violation) — NOT for raw render/stderr
-        errors, where the root cause is often several lines away from where
-        the traceback points and full-file context is genuinely needed.
-
-        Returns the full patched code string, or None if Gemini fix failed
-        (caller should fall back to the full-file _ask_gemini_to_fix or
-        render with auto-fixed code as-is).
-        """
+        """Targeted line fix for violations."""
         logger.info(f"🔧 Asking Gemini for targeted line fix ({len(violations)} violations)")
         
         lines = code.splitlines()
 
-        # Build one context block per violation, each tagged with a stable
-        # context_id so we know exactly which lines to replace after Gemini
-        # responds — no fuzzy matching needed.
         blocks = []
-        replace_ranges: dict[str, tuple[int, int]] = {}  # context_id -> (start_idx, end_idx) inclusive, 0-based
+        replace_ranges: dict[str, tuple[int, int]] = {}
 
         for i, v in enumerate(violations):
             ctx_id = f"v{i}_{v.rule}"
-            line_idx = v.line - 1  # Violation.line is 1-based
+            line_idx = v.line - 1
             start = max(0, line_idx - context_radius)
             end = min(len(lines) - 1, line_idx + context_radius)
 
@@ -494,7 +451,6 @@ class Manim_Engine:
                     parsed = json.loads(raw)
                 except json.JSONDecodeError as e:
                     logger.error(f"Gemini line-fix JSON parse failed: {e}")
-                    logger.error(f"Sanitized raw (first 300): {raw[:300]}")
                     return None
 
                 fixes = parsed.get("fixes")
@@ -502,8 +458,6 @@ class Manim_Engine:
                     logger.warning("Gemini line-fix response had no usable 'fixes' field.")
                     return None
 
-                # Splice replacements back in, working from the BOTTOM up so
-                # earlier replace_ranges indices stay valid as line counts shift.
                 ordered = sorted(
                     replace_ranges.items(),
                     key=lambda kv: kv[1][0],
@@ -553,6 +507,7 @@ class Manim_Engine:
         expected_count: int,
         question_titles: list[str] | None = None,
     ) -> dict:
+        """Ensure episode count matches expected."""
         episodes = lesson_json.get("episodes", [])
         actual = len(episodes)
         
@@ -601,7 +556,8 @@ class Manim_Engine:
         logger.info(f"✅ Episode count enforced: now {len(episodes)} episodes")
         return lesson_json
 
-    def render_episode(self, episode_data: dict, *, uid: str | None = None, lesson_id: str | None = None) -> dict:
+    async def render_episode(self, episode_data: dict, *, uid: str | None = None, lesson_id: str | None = None) -> dict:
+        """Render a single episode with video + audio combination."""
         ep_num = episode_data.get("episode_number", 0)
         logger.info(f"🔄 ===== STARTING RENDER for episode {ep_num} =====")
         logger.info(f"   uid={uid}, lesson_id={lesson_id}")
@@ -623,6 +579,7 @@ class Manim_Engine:
                 for fix in val.auto_fixes:
                     logger.info(f"    • {fix}")
 
+            # ── Handle violations ──────────────────────────────────────────────
             if val.has_violations:
                 logger.warning(
                     f"  ⚠️ Ep {ep_num} attempt {attempt}: "
@@ -632,52 +589,36 @@ class Manim_Engine:
                     logger.warning(f"    [{v.rule}] line {v.line}: {v.snippet[:60]}")
 
                 if attempt > MAX_RETRIES:
-                    logger.error(f"❌ Episode {ep_num}: Violations not resolved after {MAX_RETRIES} retries")
-                    return {
-                        "status": "error",
-                        "message": (
-                            f"Violations not resolved after {MAX_RETRIES} retries:\n"
-                            + val.violation_summary()
-                        ),
-                        "attempts": attempt,
-                    }
-
-                fixed_code = self._ask_gemini_to_fix_lines(
-                    code=val.fixed_code,
-                    violations=val.violations,
-                )
-                if fixed_code is not None:
-                    current_data["manim_code_lines"] = fixed_code.splitlines()
-                    continue  # re-validate
-
-                # Targeted line-fix failed/unavailable — fall back to the
-                # full-file fixer once before giving up on this attempt.
-                logger.warning(
-                    f"  ⚠️ Ep {ep_num}: targeted line-fix failed, "
-                    "falling back to full-file fix."
-                )
-                fixed_lines = self._ask_gemini_to_fix(
-                    original_code=val.fixed_code,
-                    error_message="Pre-render validation failed — see violations.",
-                    violation_summary=val.violation_summary(),
-                )
-                if fixed_lines is None:
-                    # Gemini unavailable — try rendering with auto-fixed code anyway
-                    # (better than failing immediately on a rate limit)
                     logger.warning(
-                        f"  ⚠️ Ep {ep_num}: Gemini unavailable (rate limit?). "
-                        "Attempting render with auto-fixed code."
+                        f"  ⚠️ Ep {ep_num}: Out of retries, attempting render with auto-fixed code..."
                     )
                     current_data["manim_code_lines"] = val.fixed_code.splitlines()
-                    # Fall through to render
                 else:
-                    current_data["manim_code_lines"] = fixed_lines
-                    continue  # re-validate
-
+                    fixed_code = self._ask_gemini_to_fix_lines(
+                        code=val.fixed_code,
+                        violations=val.violations,
+                    )
+                    if fixed_code is not None:
+                        current_data["manim_code_lines"] = fixed_code.splitlines()
+                        continue
+                    else:
+                        fixed_lines = self._ask_gemini_to_fix(
+                            original_code=val.fixed_code,
+                            error_message="Pre-render validation failed — see violations.",
+                            violation_summary=val.violation_summary(),
+                        )
+                        if fixed_lines is None:
+                            logger.warning(
+                                f"  ⚠️ Ep {ep_num}: Gemini unavailable, attempting render with auto-fixed code."
+                            )
+                            current_data["manim_code_lines"] = val.fixed_code.splitlines()
+                        else:
+                            current_data["manim_code_lines"] = fixed_lines
+                            continue
             else:
                 current_data["manim_code_lines"] = val.fixed_code.splitlines()
 
-            # ── STEP 2.5: Quality Check (BEFORE rendering to save time) ────
+            # ── Quality Check ─────────────────────────────────────────────────
             is_quality_ok, quality_issues = _quality_check(self, current_data["manim_code_lines"])
             
             if not is_quality_ok:
@@ -686,71 +627,58 @@ class Manim_Engine:
                     logger.warning(f"    • {issue}")
                 
                 if attempt > MAX_RETRIES:
-                    logger.error(f"❌ Episode {ep_num}: Quality issues not resolved after {MAX_RETRIES} retries")
-                    return {
-                        "status": "error",
-                        "message": f"Quality check failed after {MAX_RETRIES} retries:\n" + "\n".join(quality_issues),
-                        "attempts": attempt,
-                    }
-                
-                # Try to fix quality issues with Gemini (line fix first)
-                logger.info(f"  🔧 Attempting to fix quality issues for episode {ep_num}...")
-                
-                # Convert quality issues to Violation objects for the line fixer
-                quality_violations = []
-                for i, issue in enumerate(quality_issues):
-                    # Find the line number where this issue occurs
-                    line_num = 1
-                    for line_idx, line in enumerate(current_data["manim_code_lines"]):
-                        if 'scale_to_fit_width' in line and 'Missing scale_to_fit_width' in issue:
-                            line_num = line_idx + 1
-                            break
-                        elif 'font_size=' in issue:
-                            if 'font_size' in line:
+                    logger.warning(f"  ⚠️ Ep {ep_num}: Out of retries, attempting render despite quality issues...")
+                else:
+                    logger.info(f"  🔧 Attempting to fix quality issues for episode {ep_num}...")
+                    
+                    quality_violations = []
+                    for i, issue in enumerate(quality_issues):
+                        line_num = 1
+                        for line_idx, line in enumerate(current_data["manim_code_lines"]):
+                            if 'scale_to_fit_width' in line and 'Missing scale_to_fit_width' in issue:
                                 line_num = line_idx + 1
                                 break
-                        elif 'MathTex' in line and 'Thai' in issue:
-                            line_num = line_idx + 1
-                            break
-                    else:
-                        line_num = len(current_data["manim_code_lines"])
+                            elif 'font_size=' in issue:
+                                if 'font_size' in line:
+                                    line_num = line_idx + 1
+                                    break
+                            elif 'MathTex' in line and 'Thai' in issue:
+                                line_num = line_idx + 1
+                                break
+                        else:
+                            line_num = len(current_data["manim_code_lines"])
+                        
+                        class QualityViolation:
+                            def __init__(self, line, rule, description):
+                                self.line = line
+                                self.rule = rule
+                                self.description = description
+                                self.snippet = current_data["manim_code_lines"][line-1] if line <= len(current_data["manim_code_lines"]) else ""
+                        
+                        quality_violations.append(QualityViolation(line_num, f"QUALITY_{i}", issue))
                     
-                    # Create a Violation-like object
-                    class QualityViolation:
-                        def __init__(self, line, rule, description):
-                            self.line = line
-                            self.rule = rule
-                            self.description = description
-                            self.snippet = current_data["manim_code_lines"][line-1] if line <= len(current_data["manim_code_lines"]) else ""
-                    
-                    quality_violations.append(QualityViolation(line_num, f"QUALITY_{i}", issue))
-                
-                # Try line fix first (cheaper API call)
-                fixed_code = self._ask_gemini_to_fix_lines(
-                    code="\n".join(current_data["manim_code_lines"]),
-                    violations=quality_violations,
-                )
-                
-                if fixed_code is not None:
-                    current_data["manim_code_lines"] = fixed_code.splitlines()
-                    logger.info(f"  ✅ Quality issues sent to Gemini for line fix")
-                    continue  # re-validate and re-check quality
-                else:
-                    # If line fix fails, try full fix
-                    logger.warning(f"  ⚠️ Line fix failed, trying full-file fix for quality issues")
-                    fixed_lines = self._ask_gemini_to_fix(
-                        original_code="\n".join(current_data["manim_code_lines"]),
-                        error_message=f"Quality check failed:\n" + "\n".join(quality_issues),
+                    fixed_code = self._ask_gemini_to_fix_lines(
+                        code="\n".join(current_data["manim_code_lines"]),
+                        violations=quality_violations,
                     )
-                    if fixed_lines is not None:
-                        current_data["manim_code_lines"] = fixed_lines
-                        logger.info(f"  ✅ Quality issues sent to Gemini for full fix")
+                    
+                    if fixed_code is not None:
+                        current_data["manim_code_lines"] = fixed_code.splitlines()
+                        logger.info(f"  ✅ Quality issues sent to Gemini for line fix")
                         continue
                     else:
-                        logger.warning(f"  ⚠️ Gemini unavailable for quality fix, attempting render anyway")
-                        # Fall through to render
+                        fixed_lines = self._ask_gemini_to_fix(
+                            original_code="\n".join(current_data["manim_code_lines"]),
+                            error_message=f"Quality check failed:\n" + "\n".join(quality_issues),
+                        )
+                        if fixed_lines is not None:
+                            current_data["manim_code_lines"] = fixed_lines
+                            logger.info(f"  ✅ Quality issues sent to Gemini for full fix")
+                            continue
+                        else:
+                            logger.warning(f"  ⚠️ Gemini unavailable for quality fix, attempting render anyway")
 
-            # ── Step 1: Security check ───────────────────────────────────────
+            # ── Security check ──────────────────────────────────────────────
             filepath, code_string = self._write_scene_file(current_data, filename)
             is_safe, safety_msg = self._validate_code(code_string)
             if not is_safe:
@@ -772,15 +700,45 @@ class Manim_Engine:
                 current_data["manim_code_lines"] = fixed_lines
                 continue
 
-            # ── Step 2: Render ───────────────────────────────────────────────
+            # ── Render ──────────────────────────────────────────────────────
             success, render_output = self._run_manim(filepath)
             if success:
                 logger.info(f"✅ Episode {ep_num} rendered OK on attempt {attempt}.")
                 mp4_path = self._resolve_rendered_mp4_path(filepath)
-
+                
+                # ── Generate Audio (AWAIT properly) ──────────────────────────
+                audio_engine = AudioEngine(output_dir=os.path.join(self.output_dir, "audio"))
+                
+                # Now we can properly await since this is an async function
+                audio_result = await audio_engine.generate_episode_audio(episode_data)
+                
+                final_video_path = None
+                audio_path = audio_result.get("audio_path") if audio_result.get("status") == "success" else None
+                
+                if audio_path and os.path.exists(audio_path):
+                    logger.info(f"✅ Audio generated: {audio_path}")
+                    # ── Combine Video + Audio ──────────────────────────────
+                    video_engine = VideoEngine(output_dir=os.path.join(self.output_dir, "final"))
+                    final_video_path = video_engine.combine_video_audio(
+                        video_path=mp4_path,
+                        audio_path=audio_path,
+                        episode_number=ep_num,
+                    )
+                    
+                    if final_video_path and os.path.exists(final_video_path):
+                        logger.info(f"✅ Final combined video created: {final_video_path}")
+                        mp4_path = final_video_path
+                    else:
+                        logger.warning(f"⚠️ Video+Audio combination failed, using raw video")
+                else:
+                    logger.warning(f"⚠️ Audio generation failed, using raw video")
+                    if audio_result:
+                        logger.warning(f"   Audio error: {audio_result.get('message')}")
+                
+                # ── Upload to Cloudinary ────────────────────────────────────
                 upload_doc = None
                 if uid and os.path.exists(mp4_path):
-                    logger.info(f"📤 Uploading video to Firebase for episode {ep_num}...")
+                    logger.info(f"📤 Uploading final video to Cloudinary for episode {ep_num}...")
                     upload_doc = upload_episode_video(
                         mp4_path,
                         uid=uid,
@@ -789,22 +747,15 @@ class Manim_Engine:
                         question_title=episode_data.get("question_title"),
                     )
                     if upload_doc is None:
-                        logger.warning(
-                            f"⚠️ Episode {ep_num}: render succeeded but Firestore/"
-                            "Storage upload was skipped or failed (non-fatal — "
-                            f"video still exists locally at {mp4_path})"
-                        )
+                        logger.warning(f"⚠️ Episode {ep_num}: upload failed")
                     else:
                         logger.info(f"✅ Episode {ep_num} uploaded successfully!")
                         logger.info(f"   Video URL: {upload_doc.get('video_url')}")
                         logger.info(f"   Document ID: {upload_doc.get('doc_id')}")
                 elif uid and not os.path.exists(mp4_path):
-                    logger.warning(
-                        f"⚠️ Episode {ep_num}: render reported success but expected "
-                        f"mp4 not found at {mp4_path} — skipping upload."
-                    )
+                    logger.warning(f"⚠️ Episode {ep_num}: expected file not found at {mp4_path}")
                 elif not uid:
-                    logger.info(f"ℹ️ No uid provided, skipping Firebase upload for episode {ep_num}")
+                    logger.info(f"ℹ️ No uid provided, skipping upload for episode {ep_num}")
 
                 logger.info(f"✅ Episode {ep_num} complete!")
                 return {
@@ -812,6 +763,7 @@ class Manim_Engine:
                     "filepath": filepath,
                     "video_path": mp4_path,
                     "video_url": upload_doc["video_url"] if upload_doc else None,
+                    "audio_result": audio_result if audio_result else None,
                     "output": render_output,
                     "attempts": attempt,
                 }
@@ -839,7 +791,8 @@ class Manim_Engine:
             "attempts": min(attempt, MAX_RETRIES + 1),
         }
 
-    def render_all_episodes(self, lesson_json: dict, *, uid: str | None = None, lesson_id: str | None = None) -> list[dict]:
+    async def render_all_episodes(self, lesson_json: dict, *, uid: str | None = None, lesson_id: str | None = None) -> list[dict]:
+        """Render all episodes with video + audio combination."""
         episodes = lesson_json.get("episodes", [])
         total = len(episodes)
         
@@ -849,11 +802,10 @@ class Manim_Engine:
         results = []
         for i, episode in enumerate(episodes, 1):
             logger.info(f"📹 Processing episode {i}/{total}")
-            result = self.render_episode(episode, uid=uid, lesson_id=lesson_id)
+            result = await self.render_episode(episode, uid=uid, lesson_id=lesson_id)
             result["episode_number"] = episode.get("episode_number")
             results.append(result)
             
-            # Log summary after each episode
             status = result.get("status", "unknown")
             logger.info(f"📊 Episode {i} status: {status}")
             if status == "success":
@@ -861,13 +813,13 @@ class Manim_Engine:
             else:
                 logger.warning(f"   Error: {result.get('message', 'Unknown error')[:100]}")
         
-        # Summary of all episodes
         success_count = sum(1 for r in results if r.get("status") == "success")
         logger.info(f"🏁 ===== RENDER COMPLETE: {success_count}/{total} episodes successful =====")
         
         return results
 
     def count_questions_first(self, page_content: str) -> int:
+        """Count questions in the page content."""
         try:
             response = self.gemini_client.models.generate_content(
                 model="gemini-3.5-flash",

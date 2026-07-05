@@ -1000,66 +1000,80 @@ def _detect_font_size_violations(lines: list[str]) -> list[Violation]:
     return violations
 
 
+# In code_validator.py, replace the _detect_bottom_zone_empty function with:
+
 def _detect_bottom_zone_empty(lines: list[str]) -> list[Violation]:
     """
-    Detect if bottom zone has no content (empty for too long).
-    Only flag if there are LESS than 2 steps AND the episode has content.
-
-    NOTE: this used to require 'bottom_center' and 'VGroup(' on the SAME
-    line, which never happens with the standard boilerplate this project
-    uses -- the VGroup is always assigned on one line and moved to
-    bottom_center on a LATER line, e.g.:
-        step1_group = VGroup(step1_title, eq1, eq2, eq3).arrange(...)
-        ...
-        step1_group.move_to(bottom_center)
-    That made this rule fire on essentially every episode regardless of
-    whether the bottom zone actually had content (confirmed: Episode 3 in
-    testing rendered fine despite being flagged). This version follows each
-    VGroup assignment forward to see if THAT SAME VARIABLE is later moved
-    to bottom_center and contains a MathTex step.
+    Detect if bottom zone has no content.
+    Only flag if there are truly NO steps at all in the bottom zone.
     """
     violations = []
-
+    
+    # Check for bottom zone content by looking for VGroups moved to bottom_center
     vgroup_assign_pattern = re.compile(r'(\w+)\s*=\s*VGroup\(')
-    bottom_step_count = 0
-
+    
     for i, line in enumerate(lines):
         m = vgroup_assign_pattern.search(line)
         if not m:
             continue
         var_name = m.group(1)
-        # The MathTex objects a VGroup wraps are almost always DEFINED BEFORE
-        # the VGroup(...) line (e.g. `eq1 = MathTex(...)` then later
-        # `step1_group = VGroup(step1_title, eq1, eq2, eq3)`), while
-        # `.move_to(bottom_center)` comes AFTER. So the window must look both
-        # backward and forward from this line, not forward-only.
-        window = lines[max(0, i - 15):min(i + 25, len(lines))]
+        
+        # Skip axes-related VGroups
+        if 'axes' in var_name.lower() or 'vis' in var_name.lower() or 'viz' in var_name.lower():
+            continue
+            
+        # Check if this VGroup is moved to bottom_center
+        window = lines[max(0, i):min(i + 35, len(lines))]
         window_text = "\n".join(window)
-        moved_to_bottom = f'{var_name}.move_to(bottom_center)' in window_text
-        has_mathtex = 'MathTex' in window_text
-        if moved_to_bottom and has_mathtex:
-            bottom_step_count += 1
-
-    # Only flag if there are LESS than 2 steps AND the episode has content
-    if bottom_step_count < 2:
-        has_content = False
-        for line in lines[:50]:
-            if 'Text(' in line or 'MathTex' in line or 'Axes' in line:
-                has_content = True
+        
+        if f'{var_name}.move_to(bottom_center)' in window_text:
+            # Found bottom zone content - this episode is fine
+            return []
+    
+    # If we get here, no bottom zone VGroup found
+    # But double-check: maybe the code uses direct placement without VGroup?
+    has_equations = False
+    for i, line in enumerate(lines):
+        if 'bottom_center' in line:
+            # Look backward for MathTex that might be in bottom zone
+            for back in range(max(0, i - 25), i):
+                if 'MathTex' in lines[back] and 'bottom' not in lines[back].lower():
+                    has_equations = True
+                    break
+            if has_equations:
                 break
-
-        if has_content:
-            violations.append(Violation(
-                rule="BOTTOM_ZONE_EMPTY",
-                line=1,
-                snippet="construct() method",
-                description=(
-                    "พบ bottom zone มี content น้อยเกินไป (ควรมีอย่างน้อย 2 ขั้นตอน) — "
-                    "โจทย์ต้องมีขั้นตอนการคำนวณที่ชัดเจน"
-                )
-            ))
-
+    
+    if not has_equations:
+        # One more check: any step_title or equation content?
+        for line in lines[:80]:
+            if 'step_title' in line or 'eq' in line and 'MathTex' in line:
+                return []  # Found equations, it's fine
+    
+    # Only flag if there's truly no content
+    has_content = False
+    for line in lines[:50]:
+        if 'Text(' in line or 'MathTex' in line or 'VGroup' in line:
+            has_content = True
+            break
+    
+    if has_content:
+        violations.append(Violation(
+            rule="BOTTOM_ZONE_EMPTY",
+            line=1,
+            snippet="construct() method",
+            description="ไม่พบเนื้อหาในโซนล่าง — ตรวจสอบว่ามี VGroup(...).move_to(bottom_center) หรือไม่"
+        ))
+    
     return violations
+
+
+def _fix_aligned_edge_center(code: str, fixes: list[str]) -> str:
+    """Fix aligned_edge=CENTER which doesn't exist in Manim."""
+    pattern = re.compile(r'aligned_edge\s*=\s*CENTER')
+    if pattern.search(code):
+        fixes.append("AUTO-FIX: aligned_edge=CENTER → aligned_edge=LEFT (CENTER doesn't exist in Manim)")
+        code = pattern.sub('aligned_edge=LEFT', code)
+    return code
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1084,6 +1098,7 @@ def preprocess_code(code_string: str) -> ValidationResult:
     code = _fix_tex_mobject(code, auto_fixes)
     code = _fix_indicate_flash(code, auto_fixes)
     code = _fix_font_in_mathtex(code, auto_fixes)
+    code = _fix_aligned_edge_center(code, auto_fixes)
     
     # 2. Variable/value fixes
     code = _fix_bottom_zone_bottom(code, auto_fixes)
