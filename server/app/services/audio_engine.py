@@ -1,7 +1,20 @@
 """
 server/app/services/audio_engine.py
 
-Thai TTS audio engine using Microsoft Edge TTS (th-TH-PremwadeeNeural).
+Thai TTS audio engine using Microsoft Edge TTS (th-TH-PremwadeeNeural) as the
+primary engine, with an automatic gTTS fallback if edge-tts is unavailable.
+
+Why the fallback exists:
+    edge-tts is an unofficial wrapper around Microsoft Edge's internal
+    read-aloud service. Microsoft periodically rotates the internal trusted
+    client token / expected Edge browser version, which makes every
+    outstanding edge-tts install start failing with a hard 403
+    (WSServerHandshakeError) until the library is updated to match
+    (see https://github.com/rany2/edge-tts/issues — #290, #401, #452, #458).
+    Upgrading edge-tts fixes it most of the time, but since this can recur
+    without warning, we fall back to gTTS so the render pipeline still gets
+    *real* narration instead of silence if Microsoft blocks edge-tts again.
+
 Converts voiceover_script segments from a lesson episode JSON into a single
 merged audio file that is time-aligned with the Manim video.
 
@@ -11,14 +24,14 @@ Usage:
     # result["audio_path"] → path to the merged .mp3
 
 Dependencies (add to requirements.txt):
-    edge-tts>=6.1.9
+    edge-tts>=7.2.8      # do NOT pin to an older exact version — see note above
+    gTTS>=2.5.4          # fallback engine when edge-tts is unreachable
     pydub>=0.25.1
     ffmpeg  (system binary — must be installed)
 """
 
 import asyncio
 import os
-import math
 import logging
 import subprocess
 import tempfile
@@ -30,6 +43,14 @@ from pydub.generators import Sine
 
 logger = logging.getLogger(__name__)
 
+# Soft dependency on gTTS — the fallback engine. We don't want a missing gTTS
+# install to crash module import; we just disable the fallback if it's absent.
+try:
+    from gtts import gTTS
+    _GTTS_AVAILABLE = True
+except ImportError:
+    _GTTS_AVAILABLE = False
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Voice configuration
 # ─────────────────────────────────────────────────────────────────────────────
@@ -37,12 +58,25 @@ THAI_VOICE = "th-TH-PremwadeeNeural"   # Female, clear, academic tone
 THAI_VOICE_MALE = "th-TH-NiwatNeural"  # Male alternative
 
 # Edge TTS SSML rate/pitch tuning for physics explanation style
-# Slightly slower than default for comprehension, natural pitch
 TTS_RATE = "+0%"     # normal speed — voiceover_script already targets ~12 chars/sec
 TTS_PITCH = "+0Hz"   # natural pitch
 TTS_VOLUME = "+0%"   # normal volume
 
 FRAME_RATE = 60      # must match Manim config.frame_rate
+
+# Retry/backoff config for edge-tts before we give up and fall back to gTTS
+EDGE_TTS_MAX_ATTEMPTS = 3
+EDGE_TTS_RETRY_BACKOFF_SECONDS = 1.5  # multiplied by attempt number
+
+# Markers that indicate "Microsoft's edge-tts backend rejected us" (as opposed
+# to e.g. a local network blip) — useful for clearer logging, not for control
+# flow (we retry either way, then fall back either way).
+_EDGE_TTS_BLOCKED_MARKERS = (
+    "403",
+    "WSServerHandshakeError",
+    "Invalid response status",
+)
+
 
 # Check if ffmpeg is available
 def check_ffmpeg():
@@ -51,6 +85,7 @@ def check_ffmpeg():
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
+
 
 if not check_ffmpeg():
     # Try common ffmpeg paths
@@ -79,7 +114,7 @@ def _silence(duration_ms: int) -> AudioSegment:
     return AudioSegment.silent(duration=max(0, duration_ms))
 
 
-async def _synthesize_segment(
+async def _synthesize_segment_edge(
     text: str,
     output_path: str,
     voice: str = THAI_VOICE,
@@ -88,22 +123,101 @@ async def _synthesize_segment(
     volume: str = TTS_VOLUME,
 ) -> bool:
     """
-    Synthesize one text segment to an MP3 file using edge-tts.
-    Returns True on success, False on failure.
+    Try to synthesize one segment via edge-tts, with retries.
+    Returns True on success, False if all attempts fail.
     """
-    try:
-        communicate = edge_tts.Communicate(
-            text=text,
-            voice=voice,
-            rate=rate,
-            pitch=pitch,
-            volume=volume,
-        )
-        await communicate.save(output_path)
-        return True
-    except Exception as exc:
-        logger.error(f"TTS synthesis failed for text '{text[:60]}…': {exc}")
+    last_exc: Exception | None = None
+
+    for attempt in range(1, EDGE_TTS_MAX_ATTEMPTS + 1):
+        try:
+            communicate = edge_tts.Communicate(
+                text=text,
+                voice=voice,
+                rate=rate,
+                pitch=pitch,
+                volume=volume,
+            )
+            await communicate.save(output_path)
+
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                return True
+            raise RuntimeError("edge-tts wrote an empty file")
+
+        except Exception as exc:
+            last_exc = exc
+            err_str = str(exc)
+            is_blocked = any(marker in err_str for marker in _EDGE_TTS_BLOCKED_MARKERS)
+
+            if is_blocked:
+                logger.warning(
+                    f"edge-tts rejected request (Microsoft-side block, "
+                    f"attempt {attempt}/{EDGE_TTS_MAX_ATTEMPTS}): {err_str[:150]}"
+                )
+            else:
+                logger.warning(
+                    f"edge-tts transient error (attempt {attempt}/{EDGE_TTS_MAX_ATTEMPTS}): "
+                    f"{err_str[:150]}"
+                )
+
+            if attempt < EDGE_TTS_MAX_ATTEMPTS:
+                await asyncio.sleep(EDGE_TTS_RETRY_BACKOFF_SECONDS * attempt)
+
+    logger.error(
+        f"edge-tts failed after {EDGE_TTS_MAX_ATTEMPTS} attempts for "
+        f"text '{text[:60]}…': {last_exc}"
+    )
+    return False
+
+
+def _synthesize_segment_gtts_sync(text: str, output_path: str, lang: str = "th") -> bool:
+    """
+    Blocking gTTS synthesis — meant to be run via asyncio.to_thread() since
+    gTTS itself is synchronous and does blocking network I/O.
+    """
+    if not _GTTS_AVAILABLE:
+        logger.error("gTTS fallback requested but gTTS is not installed (pip install gTTS).")
         return False
+    try:
+        tts = gTTS(text=text, lang=lang, slow=False)
+        tts.save(output_path)
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+    except Exception as exc:
+        logger.error(f"gTTS fallback failed for text '{text[:60]}…': {exc}")
+        return False
+
+
+async def _synthesize_segment(
+    text: str,
+    output_path: str,
+    voice: str = THAI_VOICE,
+    rate: str = TTS_RATE,
+    pitch: str = TTS_PITCH,
+    volume: str = TTS_VOLUME,
+) -> tuple[bool, str]:
+    """
+    Synthesize one text segment to an MP3 file.
+
+    Tries edge-tts first (best quality, matches the intended
+    th-TH-PremwadeeNeural voice). If edge-tts is unreachable/blocked after
+    retries, falls back to gTTS so the pipeline still produces real narration
+    instead of silence.
+
+    Returns:
+        (success, engine_used) where engine_used is one of
+        "edge-tts", "gtts", or "none".
+    """
+    ok = await _synthesize_segment_edge(text, output_path, voice, rate, pitch, volume)
+    if ok:
+        return True, "edge-tts"
+
+    logger.warning(
+        f"Falling back to gTTS for segment '{text[:40]}…' (edge-tts unavailable)."
+    )
+    ok = await asyncio.to_thread(_synthesize_segment_gtts_sync, text, output_path, "th")
+    if ok:
+        return True, "gtts"
+
+    return False, "none"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,7 +245,8 @@ class AudioEngine:
 
         The function:
           1. Reads voiceover_script segments from episode_data.
-          2. Synthesises each segment's thai_text to a temp MP3 via edge-tts.
+          2. Synthesises each segment's thai_text to a temp MP3 (edge-tts,
+             falling back to gTTS per-segment if edge-tts fails).
           3. Trims or pads each clip to fit exactly (end_time - start_time) seconds.
           4. Assembles all clips into one master track with silence gaps, so that
              clip N starts at exactly segment["start_time_seconds"] in the output.
@@ -149,6 +264,7 @@ class AudioEngine:
                 "total_duration_seconds": float,
                 "segments_synthesised": int,
                 "segments_failed": int,
+                "engine_counts": {"edge-tts": int, "gtts": int},
             }
         """
         ep_num = episode_data.get("episode_number", 0)
@@ -174,6 +290,7 @@ class AudioEngine:
 
         synthesised = 0
         failed = 0
+        engine_counts = {"edge-tts": 0, "gtts": 0}
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             # Synthesise all segments concurrently
@@ -205,9 +322,16 @@ class AudioEngine:
                     # Empty text — fill slot with silence
                     continue
 
-                ok = next(result_iter, False)
-                if isinstance(ok, Exception) or not ok:
-                    logger.warning(f"Segment {i} TTS failed — filling with silence.")
+                result = next(result_iter, (False, "none"))
+
+                if isinstance(result, Exception):
+                    logger.warning(f"Segment {i} raised an exception — filling with silence: {result}")
+                    failed += 1
+                    continue
+
+                ok, engine_used = result
+                if not ok:
+                    logger.warning(f"Segment {i} TTS failed on all engines — filling with silence.")
                     failed += 1
                     continue
 
@@ -228,9 +352,6 @@ class AudioEngine:
 
                 if clip_ms > slot_ms:
                     # Clip is longer than slot → speed it up slightly
-                    # pydub doesn't have a built-in speed change, so we use
-                    # frame_rate manipulation (changes pitch slightly — acceptable
-                    # for TTS; use librosa for pitch-preserving if needed)
                     speed_ratio = clip_ms / slot_ms
                     if speed_ratio <= 1.5:   # only if adjustment is small
                         new_frame_rate = int(clip.frame_rate * speed_ratio)
@@ -256,6 +377,7 @@ class AudioEngine:
                 # Overlay clip onto master at the correct position
                 master = master.overlay(clip, position=start_ms)
                 synthesised += 1
+                engine_counts[engine_used] = engine_counts.get(engine_used, 0) + 1
 
         # ── Export ────────────────────────────────────────────────────────────
         out_filename = f"audio_ep_{ep_num}.mp3"
@@ -264,7 +386,9 @@ class AudioEngine:
             master.export(out_path, format="mp3", bitrate="128k")
             logger.info(
                 f"Episode {ep_num} audio exported → {out_path} "
-                f"({total_duration_s:.1f}s, {synthesised} segments, {failed} failed)"
+                f"({total_duration_s:.1f}s, {synthesised} segments "
+                f"[{engine_counts['edge-tts']} edge-tts / {engine_counts['gtts']} gTTS fallback], "
+                f"{failed} failed)"
             )
             return {
                 "status": "success",
@@ -273,6 +397,7 @@ class AudioEngine:
                 "total_duration_seconds": total_duration_s,
                 "segments_synthesised": synthesised,
                 "segments_failed": failed,
+                "engine_counts": engine_counts,
             }
         except Exception as exc:
             logger.error(f"Episode {ep_num} audio export failed: {exc}")
@@ -304,7 +429,11 @@ class AudioEngine:
         output_path: str = "preview_voice.mp3",
     ) -> str:
         """Quick preview of a voice. Returns path to the generated MP3."""
-        ok = await _synthesize_segment(text, output_path, voice=voice)
+        ok, engine_used = await _synthesize_segment(text, output_path, voice=voice)
         if ok:
+            logger.info(f"Preview generated using {engine_used}")
             return output_path
-        raise RuntimeError(f"Preview synthesis failed for voice '{voice}'.")
+        raise RuntimeError(
+            f"Preview synthesis failed for voice '{voice}' "
+            f"(both edge-tts and gTTS fallback failed)."
+        )

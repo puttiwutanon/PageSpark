@@ -144,37 +144,30 @@ def upload_episode_video(
     logger.info(f"   uid={uid}, lesson_id={lesson_id}")
     
     try:
-        # ── STEP 1: Find the rendered video (1920p60 only) ──────────────────
+        # ── STEP 1: Use the provided video path DIRECTLY ──────────────────
         if video_path is None or not os.path.exists(video_path):
-            video_path = find_latest_rendered_video(output_dir)
-            if video_path is None:
-                logger.error("❌ No rendered 1920p60 video found")
-                return None
-        else:
-            # Verify it's a 1920p60 video
-            if "1920p60" not in video_path:
-                logger.warning(f"⚠️ Video path doesn't contain 1920p60: {video_path}")
-                # Try to find the correct one
-                correct_path = find_latest_rendered_video(output_dir)
-                if correct_path:
-                    video_path = correct_path
-                    logger.info(f"✅ Using correct 1920p60 video: {video_path}")
-        
-        if not os.path.exists(video_path):
             logger.error(f"❌ Video file not found: {video_path}")
             return None
+        
+        # Check if it's the final combined video (in final/ directory)
+        is_final_video = "final" in video_path or "episode_" in os.path.basename(video_path)
+        
+        if is_final_video:
+            logger.info(f"📹 Uploading FINAL combined video: {video_path}")
+        else:
+            logger.info(f"📹 Uploading raw video: {video_path}")
 
         # Get file info
         file_size = os.path.getsize(video_path)
         file_mtime = os.path.getmtime(video_path)
         logger.info(f"📹 Video file size: {file_size / (1024*1024):.2f} MB")
         logger.info(f"📹 Video modified: {datetime.fromtimestamp(file_mtime)}")
-        logger.info(f"📹 Video path: {video_path}")
 
         # ── STEP 2: Upload to Cloudinary ─────────────────────────────────────
         logger.info("⏳ Uploading to Cloudinary...")
         timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-        public_id = f"pagespark/{uid}/episode_{episode_number}_{timestamp}"
+        suffix = "final" if is_final_video else "raw"
+        public_id = f"pagespark/{uid}/episode_{episode_number}_{suffix}_{timestamp}"
         
         result = cloudinary.uploader.upload(
             video_path,
@@ -222,7 +215,8 @@ def upload_episode_video(
             "videoDuration": video_duration,
             "fileSize": file_size,
             "localFilePath": video_path,
-            "videoQuality": "1920p60",  # Explicitly mark quality
+            "videoQuality": "final_combined" if is_final_video else "raw_manim",
+            "isFinalVideo": is_final_video,
             
             # Generation metadata
             "contentHash": kwargs.get("content_hash", None),

@@ -706,14 +706,12 @@ class Manim_Engine:
                 logger.info(f"✅ Episode {ep_num} rendered OK on attempt {attempt}.")
                 mp4_path = self._resolve_rendered_mp4_path(filepath)
                 
-                # ── Generate Audio (AWAIT properly) ──────────────────────────
+                # ── Generate Audio ──────────────────────────────────────────
                 audio_engine = AudioEngine(output_dir=os.path.join(self.output_dir, "audio"))
-                
-                # Now we can properly await since this is an async function
                 audio_result = await audio_engine.generate_episode_audio(episode_data)
                 
                 final_video_path = None
-                audio_path = audio_result.get("audio_path") if audio_result.get("status") == "success" else None
+                audio_path = audio_result.get("audio_path") if audio_result.get("status") in ["success", "partial"] else None
                 
                 if audio_path and os.path.exists(audio_path):
                     logger.info(f"✅ Audio generated: {audio_path}")
@@ -727,20 +725,21 @@ class Manim_Engine:
                     
                     if final_video_path and os.path.exists(final_video_path):
                         logger.info(f"✅ Final combined video created: {final_video_path}")
-                        mp4_path = final_video_path
+                        # Use final video for upload
+                        upload_video_path = final_video_path
                     else:
                         logger.warning(f"⚠️ Video+Audio combination failed, using raw video")
+                        upload_video_path = mp4_path
                 else:
                     logger.warning(f"⚠️ Audio generation failed, using raw video")
-                    if audio_result:
-                        logger.warning(f"   Audio error: {audio_result.get('message')}")
+                    upload_video_path = mp4_path
                 
                 # ── Upload to Cloudinary ────────────────────────────────────
                 upload_doc = None
-                if uid and os.path.exists(mp4_path):
+                if uid and os.path.exists(upload_video_path):
                     logger.info(f"📤 Uploading final video to Cloudinary for episode {ep_num}...")
                     upload_doc = upload_episode_video(
-                        mp4_path,
+                        upload_video_path,  # Use the combined video path
                         uid=uid,
                         episode_number=ep_num,
                         lesson_id=lesson_id,
@@ -752,8 +751,8 @@ class Manim_Engine:
                         logger.info(f"✅ Episode {ep_num} uploaded successfully!")
                         logger.info(f"   Video URL: {upload_doc.get('video_url')}")
                         logger.info(f"   Document ID: {upload_doc.get('doc_id')}")
-                elif uid and not os.path.exists(mp4_path):
-                    logger.warning(f"⚠️ Episode {ep_num}: expected file not found at {mp4_path}")
+                elif uid and not os.path.exists(upload_video_path):
+                    logger.warning(f"⚠️ Episode {ep_num}: expected file not found at {upload_video_path}")
                 elif not uid:
                     logger.info(f"ℹ️ No uid provided, skipping upload for episode {ep_num}")
 
@@ -761,7 +760,7 @@ class Manim_Engine:
                 return {
                     "status": "success",
                     "filepath": filepath,
-                    "video_path": mp4_path,
+                    "video_path": upload_video_path,
                     "video_url": upload_doc["video_url"] if upload_doc else None,
                     "audio_result": audio_result if audio_result else None,
                     "output": render_output,
