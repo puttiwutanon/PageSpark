@@ -5,6 +5,7 @@ import FontAwesome from '@expo/vector-icons/FontAwesome';
 import HomeScreen from '../screens/main/homeScreen';
 import AccountScreen from '../screens/main/accountScreen';
 import VideoStorageScreen from '../screens/main/videoStorageScreen';
+import VideoLessonScreen from '../screens/main/VideoLesson/VideoLessonScreen';
 import { navbarStyle } from '../styles/navbarStyles';
 
 const Tab = createBottomTabNavigator();
@@ -38,8 +39,8 @@ const Navbar = () => {
       }}
     >
       <Tab.Screen
-        name="videoStorage"
-        component={VideoStorageScreen}
+        name="videoLesson"
+        component={VideoLessonScreen}
         options={{
           tabBarIcon: ({ color }) => (
             <FontAwesome6 name="film" size={24} color={color} />

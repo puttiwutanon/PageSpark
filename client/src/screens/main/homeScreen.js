@@ -41,7 +41,7 @@ const HomeScreen = () => {
             <View style={homeScreenStyle.recentActivityHeader}>
                 <AppText style={homeScreenStyle.welcomeText}>กิจกรรมล่าสุด</AppText>
 
-                <AppText style={homeScreenStyle.subText} onPress={() => navigation.navigate('videoStorage')}>
+                <AppText style={homeScreenStyle.subText} onPress={() => navigation.navigate('videoLesson')}>
                     ดูทั้งหมด
                 </AppText>
             </View>
