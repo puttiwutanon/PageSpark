@@ -58,13 +58,27 @@ export async function saveQuizToFirestore(topics, questionsPerTopic, questions, 
  * Fetch all saved quizzes (ordered newest first).
  * @returns {{ id: string, title: string, totalQuestions: number, createdAt: Timestamp }[]}
  */
+// In quizFirestore.js, add:
 export async function fetchAllQuizzes() {
-  const q = query(
-    collection(db, QUIZZES_COLLECTION),
-    orderBy('createdAt', 'desc'),
-  );
-  const snap = await getDocs(q);
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    try {
+        const quizzesRef = collection(db, 'quizzes');
+        const q = query(quizzesRef, orderBy('createdAt', 'desc'));
+        const snapshot = await getDocs(q);
+        
+        const quizzes = [];
+        for (const docSnap of snapshot.docs) {
+            const data = docSnap.data();
+            quizzes.push({
+                id: docSnap.id,
+                ...data,
+                createdAt: data.createdAt?.toDate?.() || data.createdAt || new Date(),
+            });
+        }
+        return quizzes;
+    } catch (error) {
+        console.error('Error fetching quizzes:', error);
+        throw error;
+    }
 }
 
 /**

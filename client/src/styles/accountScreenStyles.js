@@ -1,62 +1,53 @@
+// styles/accountScreenStyles.js
+
 import { StyleSheet } from 'react-native';
 
-const accountScreenStyle = StyleSheet.create({
+export const accountScreenStyle = StyleSheet.create({
     profileContainer: {
-        width: '100%',
         flex: 1,
+        experimental_backgroundImage: 'linear-gradient(360deg, #c9befc, #c6cdfc, #e2ddfd, #ece8fd)',
         alignItems: 'center',
-        experimental_backgroundImage: 'linear-gradient(360deg, #c9befc, #c6cdfc, #e2ddfd, #ece8fd)'
     },
     profileHeader: {
-        width: '100%',
         alignItems: 'center',
-        marginTop: '20%',
+        marginTop: '15%',
+        gap: 8,
     },
     welcomeText: {
-        fontSize: 24,
+        fontSize: 18,
         color: '#334155',
-    },
-    subText: {
-        fontSize: 16,
-        marginTop: 10,
+        letterSpacing: 1,
     },
     accountInfoContainer: {
-        width: '90%',
-        marginTop: '10%',
-        display: 'flex',
         flexDirection: 'row',
-        justifyContent: 'center',
+        justifyContent: 'space-between',
+        width: '100%',
+        marginTop: 16,
+        gap: 12,
     },
     routeToFunction: {
-        backgroundColor: 'rgba(128, 128, 128, 0.27)',
-        padding: 10,
-        margin: 10,
-        borderRadius: 16,
-        width: '50%',
-        height: 100,
-        display: 'flex',
-        justifyContent: 'center',
+        flex: 1,
+        backgroundColor: 'rgba(15, 23, 42, 0.5)',
+        borderRadius: 12,
+        padding: 14,
         alignItems: 'center',
-        fontSize: 16,
+        gap: 4,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.05)',
     },
     logoutContainer: {
-        width: '100%',
-        alignItems: 'center',
-        marginTop: '5%',
-        marginBottom: '25%',
+        position: 'absolute',
+        bottom: 40,
+        width: '90%',
+        marginBottom: 70,
     },
     logoutButton: {
-        backgroundColor: '#FF3B30',
-        padding: 10,
-        margin: 10,
-        borderRadius: 16,
-        width: '40%',
-        height: 50,
-        display: 'flex',
-        justifyContent: 'center',
-        alignItems: 'center',
         flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 10,
+        backgroundColor: 'rgba(15, 23, 42, 0.5)',
+        paddingVertical: 14,
+        borderRadius: 12,
     },
 });
-
-export { accountScreenStyle };

@@ -1,30 +1,35 @@
 /**
  * screens/VideoLesson/VideoPlayerScreen.jsx
  * 
- * Simple video player that opens videos in the device's native player.
- * No expo-av required - uses React Native's Linking API.
+ * TikTok/Shorts-style video player using expo-video with single player.
+ * Features:
+ *   - Vertical swipe to go to next/previous episode
+ *   - Auto-play when visible
+ *   - Pause when not visible
+ *   - Episode info overlay (title, question, episode number)
+ *   - Video fills entire screen
+ *   - Hardware back button support
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View,
   StyleSheet,
   SafeAreaView,
   TouchableOpacity,
   Dimensions,
+  FlatList,
   StatusBar,
-  ActivityIndicator,
-  ScrollView,
-  Linking,
-  Alert,
+  BackHandler,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import FontAwesome5 from '@expo/vector-icons/FontAwesome5';
 import AppText from '../../../components/appText';
 
 const { width, height } = Dimensions.get('window');
 
-// ── Video Player Screen ──────────────────────────────────────────────────────
+// ── Main Screen ──────────────────────────────────────────────────────────────
 
 const VideoPlayerScreen = () => {
   const navigation = useNavigation();
@@ -32,72 +37,154 @@ const VideoPlayerScreen = () => {
   const { allEpisodes, initialIndex = 0 } = route.params || {};
   
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
-  const [isOpening, setIsOpening] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(true);
+  const flatListRef = useRef(null);
 
   const episodes = allEpisodes || [];
   const totalEpisodes = episodes.length;
   const currentEpisode = episodes[currentIndex] || null;
 
-  // Open video in external player
-  const openVideo = async (videoUrl) => {
-    try {
-      setIsOpening(true);
-      const supported = await Linking.canOpenURL(videoUrl);
-      if (supported) {
-        await Linking.openURL(videoUrl);
-      } else {
-        Alert.alert('ไม่สามารถเปิดวิดีโอได้', 'กรุณาติดตั้งแอปที่รองรับการเล่นวิดีโอ');
+  // ── Single player instance ─────────────────────────────────────────────────
+  const player = useVideoPlayer(
+    currentEpisode?.videoUrl || '',
+    player => {
+      player.loop = false;
+      player.volume = 1.0;
+      if (currentEpisode) {
+        player.play();
+        setIsPlaying(true);
       }
-    } catch (error) {
-      console.error('Error opening video:', error);
-      Alert.alert('ข้อผิดพลาด', 'ไม่สามารถเปิดวิดีโอได้');
-    } finally {
-      setIsOpening(false);
     }
-  };
+  );
 
-  // Auto-open first video when screen loads
+  // ── Handle video changes ──────────────────────────────────────────────────
   useEffect(() => {
-    if (currentEpisode?.videoUrl) {
-      openVideo(currentEpisode.videoUrl);
+    if (currentEpisode && player) {
+      // Replace the current video source
+      player.replace(currentEpisode.videoUrl);
+      player.play();
+      setIsPlaying(true);
     }
-  }, []);
+  }, [currentIndex, player]);
+
+  // ── Handle hardware back button ───────────────────────────────────────────
+  useEffect(() => {
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
+      navigation.goBack();
+      return true;
+    });
+
+    return () => backHandler.remove();
+  }, [navigation]);
+
+  // ── Handle viewable items change ──────────────────────────────────────────
+  const onViewableItemsChanged = useCallback(({ viewableItems }) => {
+    if (viewableItems.length > 0) {
+      const visibleItem = viewableItems[0];
+      const newIndex = visibleItem.index;
+      
+      if (newIndex !== currentIndex && newIndex !== undefined && newIndex < totalEpisodes) {
+        setCurrentIndex(newIndex);
+      }
+    }
+  }, [currentIndex, totalEpisodes]);
+
+  const viewabilityConfig = {
+    itemVisiblePercentThreshold: 60,
+  };
 
   // Navigate back
   const goBack = () => {
     navigation.goBack();
   };
 
+  // Toggle play/pause
+  const togglePlay = () => {
+    if (isPlaying) {
+      player.pause();
+      setIsPlaying(false);
+    } else {
+      player.play();
+      setIsPlaying(true);
+    }
+  };
+
   // Go to next episode
   const goToNext = () => {
     if (currentIndex < totalEpisodes - 1) {
-      const nextIndex = currentIndex + 1;
-      setCurrentIndex(nextIndex);
-      if (episodes[nextIndex]?.videoUrl) {
-        openVideo(episodes[nextIndex].videoUrl);
-      }
-    } else {
-      Alert.alert('สิ้นสุด', 'คุณดูวิดีโอทั้งหมดในบทเรียนนี้แล้ว');
+      flatListRef.current?.scrollToIndex({
+        index: currentIndex + 1,
+        animated: true,
+      });
     }
   };
 
   // Go to previous episode
   const goToPrevious = () => {
     if (currentIndex > 0) {
-      const prevIndex = currentIndex - 1;
-      setCurrentIndex(prevIndex);
-      if (episodes[prevIndex]?.videoUrl) {
-        openVideo(episodes[prevIndex].videoUrl);
-      }
+      flatListRef.current?.scrollToIndex({
+        index: currentIndex - 1,
+        animated: true,
+      });
     }
   };
 
-  const duration = currentEpisode?.videoDuration || 0;
-  const durationMinutes = Math.floor(duration / 60);
-  const durationSeconds = Math.floor(duration % 60);
-  const durationStr = durationMinutes > 0 
-    ? `${durationMinutes}:${durationSeconds.toString().padStart(2, '0')}`
-    : `${durationSeconds}s`;
+  // Render each video item (just a placeholder - video is rendered once)
+  const renderItem = useCallback(({ item, index }) => {
+    const isActive = index === currentIndex;
+    const duration = item.videoDuration || 0;
+    const durationMinutes = Math.floor(duration / 60);
+    const durationSeconds = Math.floor(duration % 60);
+    const durationStr = durationMinutes > 0 
+      ? `${durationMinutes}:${durationSeconds.toString().padStart(2, '0')}`
+      : `${durationSeconds}s`;
+
+    return (
+      <View style={styles.videoContainer}>
+        {/* Only show the video player on the active index */}
+        {isActive && (
+          <VideoView
+            player={player}
+            style={styles.video}
+            contentFit="cover"
+            nativeControls={false}
+          />
+        )}
+        
+        {/* Overlay Info */}
+        <View style={styles.overlay}>
+          <View style={styles.overlayGradient} />
+          
+          <View style={styles.infoContainer}>
+            {/* Episode badge */}
+            <View style={styles.episodeBadge}>
+              <FontAwesome5 name="play-circle" size={14} color="#ffffff" />
+              <AppText style={styles.episodeBadgeText}>
+                ตอนที่ {index + 1}
+              </AppText>
+              <View style={styles.dot} />
+              <AppText style={styles.episodeBadgeText}>{durationStr}</AppText>
+            </View>
+            
+            {/* Title */}
+            <AppText style={styles.videoTitle} numberOfLines={2}>
+              {item.title || `ตอนที่ ${index + 1}`}
+            </AppText>
+            
+            {/* Question title if available */}
+            {item.questionTitle && (
+              <View style={styles.questionContainer}>
+                <FontAwesome5 name="question-circle" size={14} color="#a5b4fc" />
+                <AppText style={styles.questionText} numberOfLines={2}>
+                  {item.questionTitle}
+                </AppText>
+              </View>
+            )}
+          </View>
+        </View>
+      </View>
+    );
+  }, [currentIndex, player]);
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
@@ -115,7 +202,20 @@ const VideoPlayerScreen = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar hidden />
+      
+      {/* Play/Pause Overlay - positioned absolutely over everything */}
+      <TouchableOpacity 
+        style={styles.playOverlay} 
+        onPress={togglePlay}
+        activeOpacity={0.9}
+      >
+        {!isPlaying && (
+          <View style={styles.playIconContainer}>
+            <FontAwesome5 name="play" size={40} color="rgba(255,255,255,0.8)" />
+          </View>
+        )}
+      </TouchableOpacity>
       
       {/* Back Button */}
       <TouchableOpacity style={styles.backBtn} onPress={goBack}>
@@ -123,128 +223,67 @@ const VideoPlayerScreen = () => {
       </TouchableOpacity>
       
       {/* Episode Counter */}
-      <View style={styles.counterContainer}>
-        <AppText style={styles.counterText}>
-          {currentIndex + 1} / {totalEpisodes}
-        </AppText>
-      </View>
-
-      {/* Main Content */}
-      <View style={styles.contentContainer}>
-        {/* Video Info Card */}
-        <View style={styles.videoInfoCard}>
-          <View style={styles.iconContainer}>
-            <FontAwesome5 name="play-circle" size={48} color="#818cf8" />
-          </View>
-          
-          <AppText style={styles.episodeNumber}>
-            ตอนที่ {currentIndex + 1}
+      {totalEpisodes > 1 && (
+        <View style={styles.counterContainer}>
+          <AppText style={styles.counterText}>
+            {currentIndex + 1} / {totalEpisodes}
           </AppText>
-          
-          <AppText style={styles.videoTitle} numberOfLines={3}>
-            {currentEpisode?.title || `ตอนที่ ${currentIndex + 1}`}
-          </AppText>
-          
-          {currentEpisode?.questionTitle && (
-            <View style={styles.questionContainer}>
-              <FontAwesome5 name="question-circle" size={14} color="#a5b4fc" />
-              <AppText style={styles.questionText} numberOfLines={2}>
-                {currentEpisode.questionTitle}
-              </AppText>
-            </View>
-          )}
-          
-          <View style={styles.metaContainer}>
-            <View style={styles.metaItem}>
-              <FontAwesome5 name="clock" size={14} color="#94a3b8" />
-              <AppText style={styles.metaText}>{durationStr}</AppText>
-            </View>
-            <View style={styles.metaDivider} />
-            <View style={styles.metaItem}>
-              <FontAwesome5 name="video" size={14} color="#94a3b8" />
-              <AppText style={styles.metaText}>ตอนที่ {currentIndex + 1}</AppText>
-            </View>
-          </View>
-
-          {/* Play Button */}
-          <TouchableOpacity 
-            style={styles.playButton}
-            onPress={() => {
-              if (currentEpisode?.videoUrl) {
-                openVideo(currentEpisode.videoUrl);
-              }
-            }}
-            disabled={isOpening}
-          >
-            {isOpening ? (
-              <ActivityIndicator size="small" color="#ffffff" />
-            ) : (
-              <>
-                <FontAwesome5 name="play" size={18} color="#ffffff" />
-                <AppText style={styles.playButtonText}>เปิดดูวิดีโอ</AppText>
-              </>
-            )}
-          </TouchableOpacity>
         </View>
+      )}
 
-        {/* Navigation Buttons */}
-        <View style={styles.navContainer}>
-          <TouchableOpacity 
-            style={[styles.navBtn, currentIndex === 0 && styles.navBtnDisabled]}
-            onPress={goToPrevious}
-            disabled={currentIndex === 0}
-          >
-            <FontAwesome5 name="chevron-up" size={18} color={currentIndex > 0 ? "#ffffff" : "rgba(255,255,255,0.3)"} />
-            <AppText style={[styles.navText, currentIndex === 0 && styles.navTextDisabled]}>
-              ก่อนหน้า
-            </AppText>
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={[styles.navBtn, currentIndex === totalEpisodes - 1 && styles.navBtnDisabled]}
-            onPress={goToNext}
-            disabled={currentIndex === totalEpisodes - 1}
-          >
-            <AppText style={[styles.navText, currentIndex === totalEpisodes - 1 && styles.navTextDisabled]}>
-              ถัดไป
-            </AppText>
-            <FontAwesome5 name="chevron-down" size={18} color={currentIndex < totalEpisodes - 1 ? "#ffffff" : "rgba(255,255,255,0.3)"} />
-          </TouchableOpacity>
-        </View>
-
-        {/* Episode List at bottom */}
-        <ScrollView 
-          horizontal 
-          showsHorizontalScrollIndicator={false}
-          style={styles.episodeList}
-          contentContainerStyle={styles.episodeListContent}
-        >
-          {episodes.map((ep, index) => (
-            <TouchableOpacity
-              key={ep.id}
-              style={[
-                styles.episodeDot,
-                index === currentIndex && styles.episodeDotActive
-              ]}
-              onPress={() => {
-                if (index !== currentIndex) {
-                  setCurrentIndex(index);
-                  if (ep.videoUrl) {
-                    openVideo(ep.videoUrl);
-                  }
-                }
-              }}
-            >
-              <AppText style={[
-                styles.episodeDotText,
-                index === currentIndex && styles.episodeDotTextActive
-              ]}>
-                {index + 1}
-              </AppText>
+      {/* Navigation Arrows */}
+      {totalEpisodes > 1 && (
+        <>
+          {currentIndex > 0 && (
+            <TouchableOpacity style={styles.prevBtn} onPress={goToPrevious}>
+              <FontAwesome5 name="chevron-up" size={24} color="rgba(255,255,255,0.5)" />
             </TouchableOpacity>
-          ))}
-        </ScrollView>
-      </View>
+          )}
+          {currentIndex < totalEpisodes - 1 && (
+            <TouchableOpacity style={styles.nextBtn} onPress={goToNext}>
+              <FontAwesome5 name="chevron-down" size={24} color="rgba(255,255,255,0.5)" />
+            </TouchableOpacity>
+          )}
+        </>
+      )}
+
+      {/* FlatList for vertical swiping */}
+      <FlatList
+        ref={flatListRef}
+        data={episodes}
+        renderItem={renderItem}
+        keyExtractor={(item) => item.id}
+        pagingEnabled
+        showsVerticalScrollIndicator={false}
+        snapToInterval={height}
+        snapToAlignment="start"
+        decelerationRate="fast"
+        onViewableItemsChanged={onViewableItemsChanged}
+        viewabilityConfig={viewabilityConfig}
+        initialScrollIndex={initialIndex}
+        getItemLayout={(data, index) => ({
+          length: height,
+          offset: height * index,
+          index,
+        })}
+        onScrollToIndexFailed={(info) => {
+          setTimeout(() => {
+            flatListRef.current?.scrollToIndex({
+              index: info.index,
+              animated: true,
+            });
+          }, 100);
+        }}
+      />
+      
+      {/* Swipe Hint */}
+      {totalEpisodes > 1 && (
+        <View style={styles.swipeHint}>
+          <View style={styles.swipeIndicator}>
+            <FontAwesome5 name="chevron-down" size={16} color="rgba(255,255,255,0.3)" />
+          </View>
+        </View>
+      )}
     </SafeAreaView>
   );
 };
@@ -254,7 +293,100 @@ const VideoPlayerScreen = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    experimental_backgroundImage: 'linear-gradient(360deg, #c9befc, #c6cdfc, #e2ddfd, #ece8fd)',
+    backgroundColor: '#000000',
+  },
+  videoContainer: {
+    width: width,
+    height: height,
+    backgroundColor: '#000000',
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'relative',
+  },
+  video: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    width: width,
+    height: height,
+    backgroundColor: '#000000',
+  },
+  touchOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 20,
+  },
+  playIconContainer: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  overlay: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    justifyContent: 'flex-end',
+    zIndex: 10,
+  },
+  overlayGradient: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    opacity: 0.5,
+  },
+  infoContainer: {
+    padding: 20,
+    paddingBottom: 40,
+  },
+  episodeBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 8,
+  },
+  episodeBadgeText: {
+    fontSize: 13,
+    color: 'rgba(255,255,255,0.7)',
+  },
+  dot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.4)',
+    marginHorizontal: 4,
+  },
+  videoTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#ffffff',
+    marginBottom: 6,
+    lineHeight: 28,
+  },
+  questionContainer: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginTop: 4,
+  },
+  questionText: {
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.7)',
+    flex: 1,
+    lineHeight: 20,
   },
   backBtn: {
     position: 'absolute',
@@ -265,7 +397,7 @@ const styles = StyleSheet.create({
     height: 44,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.1)',
+    backgroundColor: 'rgba(0,0,0,0.3)',
     borderRadius: 22,
   },
   counterContainer: {
@@ -273,7 +405,7 @@ const styles = StyleSheet.create({
     top: 50,
     right: 16,
     zIndex: 100,
-    backgroundColor: 'rgba(255,255,255,0.1)',
+    backgroundColor: 'rgba(0,0,0,0.5)',
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 12,
@@ -283,156 +415,21 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontWeight: '500',
   },
-  contentContainer: {
-    flex: 1,
-    justifyContent: 'center',
+  swipeHint: {
+    position: 'absolute',
+    bottom: 120,
+    left: 0,
+    right: 0,
     alignItems: 'center',
-    paddingHorizontal: 24,
-    paddingTop: 100,
-    paddingBottom: 40,
+    zIndex: 50,
   },
-  videoInfoCard: {
-    backgroundColor: 'rgba(128, 128, 128, 0.27)',
-    borderRadius: 20,
-    padding: 32,
-    width: '100%',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-  },
-  iconContainer: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(129, 140, 248, 0.15)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  episodeNumber: {
-    fontSize: 14,
-    color: '#a5b4fc',
-    fontWeight: '500',
-    marginBottom: 8,
-  },
-  videoTitle: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: '#ffffff',
-    textAlign: 'center',
-    marginBottom: 8,
-    lineHeight: 30,
-  },
-  questionContainer: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 8,
-    marginTop: 4,
-    marginBottom: 12,
-  },
-  questionText: {
-    fontSize: 14,
-    color: 'rgba(255,255,255,0.6)',
-    flex: 1,
-    textAlign: 'center',
-    lineHeight: 20,
-  },
-  metaContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  metaItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  metaText: {
-    fontSize: 13,
-    color: '#94a3b8',
-  },
-  metaDivider: {
-    width: 1,
-    height: 16,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    marginHorizontal: 12,
-  },
-  playButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 10,
-    backgroundColor: '#818cf8',
-    paddingVertical: 14,
-    paddingHorizontal: 32,
-    borderRadius: 14,
-    width: '100%',
-  },
-  playButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#ffffff',
-  },
-  navContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    width: '100%',
-    marginTop: 16,
-    gap: 12,
-  },
-  navBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 10,
-    flex: 1,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.05)',
-  },
-  navBtnDisabled: {
-    opacity: 0.3,
-  },
-  navText: {
-    fontSize: 13,
-    color: '#ffffff',
-  },
-  navTextDisabled: {
-    color: 'rgba(255,255,255,0.3)',
-  },
-  episodeList: {
-    marginTop: 16,
-    maxHeight: 50,
-  },
-  episodeListContent: {
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 8,
-  },
-  episodeDot: {
+  swipeIndicator: {
     width: 32,
     height: 32,
     borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.05)',
+    backgroundColor: 'rgba(0,0,0,0.3)',
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-  },
-  episodeDotActive: {
-    backgroundColor: '#818cf8',
-    borderColor: '#818cf8',
-  },
-  episodeDotText: {
-    fontSize: 12,
-    color: '#94a3b8',
-    fontWeight: '500',
-  },
-  episodeDotTextActive: {
-    color: '#ffffff',
   },
   errorContainer: {
     flex: 1,
@@ -447,7 +444,7 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
   },
   backButton: {
-    backgroundColor: '#818cf8',
+    backgroundColor: '#6366f1',
     paddingHorizontal: 24,
     paddingVertical: 12,
     borderRadius: 12,
