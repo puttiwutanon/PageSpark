@@ -122,6 +122,51 @@ def _fix_single_backslash_lambda(code: str, fixes: list[str]) -> str:
     return pattern.sub(replacer, code)
 
 
+def _fix_long_mathtex(code: str, fixes: list[str]) -> str:
+    """
+    Split MathTex with > 40 chars into a VGroup of multiple MathTex lines.
+    Splits at '=', '\approx', or after a comma, whichever comes first.
+    Preserves exact Python indentation of the replaced line.
+    """
+    pattern = re.compile(
+        r'^(\s*)(\w+)\s*=\s*MathTex\s*\(\s*r\'(.*?)\'\s*(?:,\s*[^)]*)?\)',
+        re.MULTILINE
+    )
+    def replacer(m):
+        indent, var, content = m.group(1), m.group(2), m.group(3)
+        if len(content) <= 40:
+            return m.group(0)
+        # Try to split at first '=' or '\approx' that is not inside braces
+        depth = 0
+        split_idx = None
+        for i, ch in enumerate(content):
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+            if depth == 0 and ch == '=':
+                split_idx = i
+                break
+        if split_idx is None:
+            # fallback: split at last comma
+            split_idx = content.rfind(',')
+            if split_idx == -1:
+                return m.group(0)  # no safe split
+        first = content[:split_idx+1].strip()
+        second = content[split_idx+1:].strip()
+        if not first or not second:
+            return m.group(0)
+        fixes.append(f"AUTO-FIX: Split long MathTex '{content[:40]}...' into two lines")
+        return (
+            f"{indent}{var} = VGroup(\n"
+            f"{indent}    MathTex(r'{first}', font_size=26),\n"
+            f"{indent}    MathTex(r'{second}', font_size=26),\n"
+            f"{indent}).arrange(DOWN, aligned_edge=LEFT, buff=0.15)\n"
+            f"{indent}{var}.scale_to_fit_width(frame_width * 0.88)"
+        )
+    return pattern.sub(replacer, code)
+
+
 def _fix_over_escaped_latex(code: str, fixes: list[str]) -> str:
     """
     Collapse over-escaped LaTeX commands inside MathTex(r'...')/Tex(r'...') calls.
@@ -428,19 +473,19 @@ def _fix_move_to_scalar(code: str, fixes: list[str]) -> str:
 
 
 def _fix_axes_too_large(code: str, fixes: list[str]) -> str:
-    """Clamp x_length/y_length on Axes(...) calls to safe limits."""
+    """Clamp x_length/y_length on Axes(...) calls to safe limits (5.4 / 4.3)."""
     def x_replacer(m):
         val = float(m.group(1))
-        if val > 5.85:
-            fixes.append(f"AUTO-FIX: x_length={val} > 5.85 → clamped to 5.85")
-            return "x_length=5.85"
+        if val > 5.4:
+            fixes.append(f"AUTO-FIX: x_length={val} > 5.4 → clamped to 5.4")
+            return "x_length=5.4"
         return m.group(0)
 
     def y_replacer(m):
         val = float(m.group(1))
-        if val > 4.68:
-            fixes.append(f"AUTO-FIX: y_length={val} > 4.68 → clamped to 4.68")
-            return "y_length=4.68"
+        if val > 4.3:
+            fixes.append(f"AUTO-FIX: y_length={val} > 4.3 → clamped to 4.3")
+            return "y_length=4.3"
         return m.group(0)
 
     code = re.sub(r'x_length\s*=\s*([0-9.]+)', x_replacer, code)
@@ -448,20 +493,60 @@ def _fix_axes_too_large(code: str, fixes: list[str]) -> str:
     return code
 
 
-def _fix_font_size_too_large(code: str, fixes: list[str]) -> str:
-    """Clamp font_size on Text()/MathTex() calls to 28."""
-    pattern = re.compile(
-        r'((?:Text|MathTex)\s*\([^)]*?font_size\s*=\s*)([0-9]+)'
-    )
+def _detect_axes_too_large(lines: list[str]) -> list[Violation]:
+    violations = []
+    for i, line in enumerate(lines, 1):
+        m = re.search(r'x_length\s*=\s*([0-9.]+)', line)
+        if m:
+            try:
+                val = float(m.group(1))
+                if val > 5.4:
+                    violations.append(Violation(
+                        rule="AXES_TOO_LARGE",
+                        line=i,
+                        snippet=line.strip()[:80],
+                        description=f"x_length={val} เกิน 5.4 — ใช้ frame_width * 0.60"
+                    ))
+            except ValueError:
+                pass
+        m = re.search(r'y_length\s*=\s*([0-9.]+)', line)
+        if m:
+            try:
+                val = float(m.group(1))
+                if val > 4.3:
+                    violations.append(Violation(
+                        rule="AXES_TOO_LARGE",
+                        line=i,
+                        snippet=line.strip()[:80],
+                        description=f"y_length={val} เกิน 4.3 — ใช้ middle_zone_height * 0.65"
+                    ))
+            except ValueError:
+                pass
+    return violations
 
-    def replacer(m):
+
+def _fix_font_size_too_large(code: str, fixes: list[str]) -> str:
+    """Clamp font_size on Text() to 28, and MathTex() to 20 (perfect size for mobile vertical video)."""
+    
+    # 1. Clamp MathTex to 20 (Matches the highlighted text size in your Q17 example)
+    def math_replacer(m):
+        size = int(m.group(2))
+        if size > 20:
+            fixes.append(f"AUTO-FIX: MathTex font_size={size} > 20 → clamped to 20")
+            return f"{m.group(1)}20"
+        return m.group(0)
+    code = re.sub(r'(MathTex\s*\([^)]*?font_size\s*=\s*)([0-9]+)', math_replacer, code)
+
+    # 2. Clamp Text to 28 (Keeps Top Zone & Step titles readable)
+    def text_replacer(m):
         size = int(m.group(2))
         if size > 28:
-            fixes.append(f"AUTO-FIX: font_size={size} > 28 → clamped to 28")
+            fixes.append(f"AUTO-FIX: Text font_size={size} > 28 → clamped to 28")
             return f"{m.group(1)}28"
         return m.group(0)
-
-    return pattern.sub(replacer, code)
+    code = re.sub(r'(Text\s*\([^)]*?font_size\s*=\s*)([0-9]+)', text_replacer, code)
+    
+    return code
 
 
 def _fix_missing_numpy_import(code: str, fixes: list[str]) -> str:
@@ -684,12 +769,12 @@ def _detect_axes_too_large(lines: list[str]) -> list[Violation]:
         if m:
             try:
                 val = float(m.group(1))
-                if val > 5.9:
+                if val > 5.4:
                     violations.append(Violation(
                         rule="AXES_TOO_LARGE",
                         line=i,
                         snippet=line.strip()[:80],
-                        description=f"x_length={val} เกิน 5.85 — ใช้ frame_width * 0.60"
+                        description=f"x_length={val} เกิน 5.4 — ควรใช้ frame_width * 0.60 (หรือ 5.4)"
                     ))
             except ValueError:
                 pass
@@ -697,12 +782,12 @@ def _detect_axes_too_large(lines: list[str]) -> list[Violation]:
         if m:
             try:
                 val = float(m.group(1))
-                if val > 4.8:
+                if val > 4.3:
                     violations.append(Violation(
                         rule="AXES_TOO_LARGE",
                         line=i,
                         snippet=line.strip()[:80],
-                        description=f"y_length={val} เกิน 4.68 — ใช้ middle_zone_height * 0.65"
+                        description=f"y_length={val} เกิน 4.3 — ควรใช้ middle_zone_height * 0.65 (หรือ 4.3)"
                     ))
             except ValueError:
                 pass
@@ -1073,53 +1158,80 @@ def _detect_undefined_variables(code: str) -> list[Violation]:
 def _detect_missing_scaling(lines: list[str]) -> list[Violation]:
     """
     Detect VGroups in bottom/middle zone without scaling.
-
-    NOTE: this used to decide "is this VGroup in the bottom/middle zone?" by
-    checking whether the literal words "bottom" or "middle" appeared in the
-    text of the VGroup's *assignment* line -- which only happens to be true
-    if the variable itself is named with "bottom"/"middle" in it. Variables
-    like `step1_group` or `prob_desc` never match, and variables like
-    `bottom_zone_height` (a float, not a VGroup) can spuriously match other
-    unrelated lines. This version instead checks whether the SAME variable
-    is later moved to `bottom_center`/`middle_center` -- which is the actual
-    definition of "being in that zone" -- and only then requires a scaling
-    call on that variable.
+    Scans forward from the assignment line to ensure scaling happens before move_to.
     """
     violations = []
-
-    vgroup_assign_pattern = re.compile(r'(\w+)\s*=\s*VGroup\(')
-    zone_targets = ('bottom_center', 'middle_center')
-
+    vgroup_assign_pattern = re.compile(r'^(\w+)\s*=\s*VGroup\(')
+    
     for i, line in enumerate(lines):
         m = vgroup_assign_pattern.search(line)
         if not m:
             continue
         var_name = m.group(1)
         if 'axes' in var_name.lower():
-            continue  # Axes groups don't need scaling
+            continue  # Axes groups are handled separately, don't double-flag
 
-        window = lines[max(0, i - 10):min(i + 15, len(lines))]
-        window_text = "\n".join(window)
+        # Scan forward up to 25 lines
+        found_scale = False
+        found_move_to_zone = False
+        scan_end = min(i + 25, len(lines))
 
-        in_zone = any(f'{var_name}.move_to({target})' in window_text for target in zone_targets)
-        if not in_zone:
-            continue  # not a bottom/middle-zone VGroup -- rule doesn't apply
+        for j in range(i + 1, scan_end):
+            cur_line = lines[j]
+            
+            # Check if this variable gets scaled in this line
+            if re.search(rf'\b{re.escape(var_name)}\.scale_to_fit_(width|height)\s*\(', cur_line):
+                found_scale = True
+                break  # Found scaling, this group is safe, no violation.
 
-        has_scaling = (
-            f'{var_name}.scale_to_fit_width' in window_text
-            or f'{var_name}.scale_to_fit_height' in window_text
-        )
-        if not has_scaling:
+            # Check if this variable gets moved to bottom/middle center
+            if re.search(rf'\b{re.escape(var_name)}\.move_to\s*\(\s*(?:bottom_center|middle_center)\s*\)', cur_line):
+                found_move_to_zone = True
+                # If we find a move_to, but haven't found a scaling yet, we have a violation.
+                break 
+
+        if found_move_to_zone and not found_scale:
             violations.append(Violation(
                 rule="MISSING_SCALING",
                 line=i + 1,
-                snippet=f"{var_name} = VGroup(...)",
+                snippet=line.strip()[:80],
                 description=(
-                    f"พบ VGroup {var_name} ในโซนล่าง/กลางแต่ไม่มี .scale_to_fit_width() — "
-                    "อาจทำให้ข้อความล้นจอ ต้องเพิ่ม scaling"
+                    f"พบ VGroup '{var_name}' เคลื่อนไปกลาง/ล่าง (move_to) "
+                    f"แต่ไม่พบการ .scale_to_fit_width() ก่อนหน้านั้น — "
+                    "อาจทำให้เนื้อหาล้นจอ แก้โดยเพิ่ม scaling"
                 )
             ))
+    return violations
 
+
+def _detect_text_overflow(lines: list[str]) -> list[Violation]:
+    """
+    Heuristic detector: estimates text width based on char count and font_size.
+    Flags if estimated width exceeds frame_width * 0.88 (~7.9 pixels).
+    """
+    violations = []
+    text_pattern = re.compile(r'Text\s*\(\s*[\'"]([^\'"]*)[\'"]\s*,\s*font_size\s*=\s*(\d+)')
+    
+    for i, line in enumerate(lines):
+        for m in text_pattern.finditer(line):
+            text_content = m.group(1)
+            font_size = int(m.group(2))
+            # Rough pixel estimate for TH Sarabun New (approx 0.55x pixel width per char)
+            estimated_width = len(text_content) * font_size * 0.55
+            
+            if estimated_width > 7.9:  # frame_width * 0.88
+                # We don't check for scaling here because scaling happens on VGroups.
+                # This detector just warns the LLM to split the string or use a VGroup.
+                violations.append(Violation(
+                    rule="TEXT_OVERFLOW",
+                    line=i + 1,
+                    snippet=line.strip()[:80],
+                    description=(
+                        f"Text '{text_content[:20]}...' (len={len(text_content)}, font_size={font_size}) "
+                        f"คาดว่าจะยาวเกินกรอบจอ (~{estimated_width:.0f}px > 7.9) — "
+                        "ให้แบ่งเป็นหลายบรรทัดใน VGroup หรือห่อด้วย .scale_to_fit_width()"
+                    )
+                ))
     return violations
 
 
@@ -1276,6 +1388,7 @@ def preprocess_code(code_string: str) -> ValidationResult:
     code = _fix_latex_escape_in_text(code, auto_fixes)
     code = _fix_mathrm_curly_braces(code, auto_fixes)
     code = _fix_double_quote_in_strings(code, auto_fixes)
+    code = _fix_long_mathtex(code, auto_fixes)
 
     # ── Phase 2: Detect remaining violations ─────────────────────────────────
     lines = code.splitlines()
@@ -1287,8 +1400,7 @@ def preprocess_code(code_string: str) -> ValidationResult:
     violations.extend(_detect_thai_in_mathrm(lines))
     violations.extend(_detect_latex_in_text(lines))
     violations.extend(_detect_move_to_scalar(lines))
-    violations.extend(_detect_axes_too_large(lines))
-    violations.extend(_detect_font_size_too_large(lines))
+    violations.extend(_detect_axes_too_large(lines))    # ← UPDATED THRESHOLDS
     violations.extend(_detect_overlapping_labels(lines))
     violations.extend(_detect_final_answer_arrange_right(lines))
     violations.extend(_detect_vgroup_list_comprehension(lines))
@@ -1296,10 +1408,13 @@ def preprocess_code(code_string: str) -> ValidationResult:
     
     # New validations
     violations.extend(_detect_math_errors(lines))
-    violations.extend(_detect_missing_scaling(lines))
+    violations.extend(_detect_missing_scaling(lines))   # ← UPDATED SCAN LOGIC
     violations.extend(_detect_font_size_violations(lines))
     violations.extend(_detect_bottom_zone_empty(lines))
     violations.extend(_detect_undefined_variables(code))
+    
+    # ← NEWLY ADDED
+    violations.extend(_detect_text_overflow(lines)) 
 
     return ValidationResult(
         fixed_code=code,

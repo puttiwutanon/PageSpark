@@ -324,6 +324,11 @@ FadeOut(obj, shift=DOWN*0.1), LaggedStart(*[FadeIn(o) for o in group], lag_ratio
 - Forces: Free Body Diagram ที่มีจุดวัตถุตรงกลาง ลูกศรแรงแต่ละแรงพร้อม label
 - Optics: เส้นแสงเข้า-ออกชัดเจน, เลนส์/กระจกวาดด้วยรูปทรงเรขาคณิตง่ายๆ
 
+[5B-4] Force diagrams: always use Arrow(start, end) with precise direction.
+Example: Arrow(start=ORIGIN, end=2*RIGHT, color=RED_C, tip_length=0.2)
+Label each arrow with a Text/MathTex using .next_to(arrow, RIGHT, buff=0.05).
+For equilibrium problems, draw a closed triangle of forces and annotate angles.
+
 ══════════════════════════════════════════════════
 5C. กฎเหล็กป้องกัน Overflow — อ่านให้ขึ้นใจ
 ══════════════════════════════════════════════════
@@ -415,6 +420,8 @@ step_group.scale_to_fit_width(frame_width * 0.88)
 step_group.scale_to_fit_height(bottom_zone_height * 0.88)
 step_group.move_to(bottom_center)
 ```
+[OVERFLOW BUG #6] ทุก Text/VGroup ที่ move_to(top_center/middle_center/bottom_center)
+ต้อง scale_to_fit_width/height ก่อน move_to ทุกครั้ง โดยไม่ยกเว้น
 
 ══════════════════════════════════════════════════
 5D. กฎ Text/MathTex Separation (ดู MANIM CODE RULES ด้านบนด้วย)
@@ -427,6 +434,16 @@ bottom_center = np.array([0, bottom_zone_bottom, 0])
 # ✅ ถูก
 bottom_center = np.array([0, bottom_zone_center_y, 0])
 ```
+
+[LONG_MATHTEX] สมการยาวเกิน 40 ตัวอักษรต้องแยกเป็น VGroup ของ MathTex หลายบรรทัด
+❌ WRONG:
+   eq = MathTex(r'F = ma = m \cdot \frac{dv}{dt} = ... (ยาวเกิน 40)', font_size=26)
+✅ CORRECT:
+   eq_lines = VGroup(
+       MathTex(r'F = ma = m \cdot \frac{dv}{dt}', font_size=26),
+       MathTex(r'\quad = m \cdot 2.0 \, \mathrm{N}', font_size=26),
+   ).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+   eq_lines.scale_to_fit_width(frame_width * 0.88)
 
 ══════════════════════════════════════════════════
 5E. Boilerplate และ Layout Standards
@@ -478,11 +495,12 @@ Zone assignment:
 |---|---|---|
 | Title โจทย์ (Top) | 28 | 28 |
 | หัวข้อขั้นตอน (Bottom) | 26 | 26 |
-| สมการ (Bottom) | — | 26 |
+| สมการ (Bottom) | — | 20 |
 | Label บนกราฟ | 18 | 18 |
 | ตัวเลขแกน (tick) | 16 | 16 |
 
-ห้ามใช้ font_size > 28 สำหรับ Title/หัวข้อขั้นตอน/สมการเด็ดขาด
+ห้ามใช้ font_size ใน Text() เกิน 28 และห้ามใช้ font_size ใน MathTex() เกิน 20 โดยเด็ดขาด 
+(ขนาด 20 เหมาะสมที่สุดสำหรับการแสดงสมการหลายบรรทัดในโซนล่างโดยไม่ต้องแยกบรรทัด)
 
 ══════════════════════════════════════════════════
 6. JSON-SAFE STRING ENCODING

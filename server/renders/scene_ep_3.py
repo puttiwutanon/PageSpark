@@ -28,53 +28,90 @@ class PhysicsScene(Scene):
         middle_center = np.array([0, middle_zone_center_y, 0])
         bottom_center = np.array([0, bottom_zone_center_y, 0])
 
-        title = Text('โจทย์ข้อ 11: แรงดึงในลวดแขวนไฟสัญญาณ', font='TH Sarabun New', font_size=28, color=GOLD_B)
-        prob_desc = Text('ไฟสัญญาณหนัก 500 N แขวนด้วยลวด AC (30°) และ BC (45°)', font='TH Sarabun New', font_size=22, color=GRAY_A)
-        top_group = VGroup(title, prob_desc).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        # Top zone
+        title = Text('โจทย์ข้อ 17: หาระบบสมดุลรอก', font='TH Sarabun New', font_size=28, color=GOLD_B)
+        problem_desc = Text('หาค่ามวล m มากที่สุด และมุม θ ที่ทำให้ระบบยังคงสมดุลได้', font='TH Sarabun New', font_size=24, color=GRAY_A)
+        top_group = VGroup(title, problem_desc).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
         top_group.scale_to_fit_width(frame_width * 0.88)
         top_group.move_to(top_center)
         self.play(FadeIn(top_group, shift=UP*0.15))
         self.wait(1.0)
 
-        # Visualization
-        junction = Dot(point=middle_center, color=GOLD_B, radius=0.1)
-        pA = np.array([-2.0, 1.15, 0]) + middle_center
-        pB = np.array([2.0, 2.0, 0]) + middle_center
-        
-        wire_AC = Line(junction.get_center(), pA, color=BLUE_C, stroke_width=4)
-        wire_BC = Line(junction.get_center(), pB, color=GREEN_C, stroke_width=4)
-        
-        light = Rectangle(width=0.6, height=1.2, color=RED_C, fill_color=RED_C, fill_opacity=0.3).move_to(np.array([0, -1.2, 0]) + middle_center)
-        light_line = Line(junction.get_center(), light.get_top(), color=RED_C, stroke_width=4)
+        # Middle zone: Diagram
+        junc = middle_center
+        string_l = Line(junc, junc + np.array([-1.8, 0, 0]), color=BLUE_C)
+        string_d = Line(junc, junc + np.array([0, -1.5, 0]), color=RED_C)
+        string_ur = Line(junc, junc + np.array([1.5, 1.5, 0]), color=GREEN_C)
 
-        label_AC = Text('T1 (30°)', font='TH Sarabun New', font_size=18, color=BLUE_C).next_to(wire_AC.get_center(), UP, buff=0.1)
-        label_BC = Text('T2 (45°)', font='TH Sarabun New', font_size=18, color=GREEN_C).next_to(wire_BC.get_center(), UP, buff=0.1)
-        label_W = Text('W = 500 N', font='TH Sarabun New', font_size=18, color=RED_C).next_to(light, DOWN, buff=0.1)
+        ceiling = Line(junc + np.array([0.8, 1.5, 0]), junc + np.array([2.2, 1.5, 0]), color=GRAY_C)
 
-        vis_group = VGroup(junction, wire_AC, wire_BC, light, light_line, label_AC, label_BC, label_W)
-        vis_group.scale_to_fit_width(frame_width * 0.85)
-        vis_group.move_to(middle_center)
+        block_l = Rectangle(width=1.0, height=0.7, color=BLUE_C, fill_opacity=0.3).move_to(junc + np.array([-2.3, 0, 0]))
+        block_l_text = Text('8 kg', font='TH Sarabun New', font_size=16, color=WHITE).move_to(block_l.get_center())
 
-        self.play(Create(light), Create(light_line), FadeIn(junction))
-        self.play(Create(wire_AC), Create(wire_BC))
-        self.play(FadeIn(label_AC), FadeIn(label_BC), FadeIn(label_W))
+        block_d = Rectangle(width=0.8, height=0.6, color=RED_C, fill_opacity=0.3).move_to(junc + np.array([0, -1.8, 0]))
+        block_d_text = Text('m', font='TH Sarabun New', font_size=16, color=WHITE).move_to(block_d.get_center())
+
+        label_t1_l = MathTex(r'T_1', font_size=20, color=BLUE_C).next_to(string_l.point_from_proportion(0.5), UP, buff=0.05)
+        label_t1_d = MathTex(r'T_1', font_size=20, color=RED_C).next_to(string_d.point_from_proportion(0.5), RIGHT, buff=0.05)
+        label_t2 = MathTex(r'T_2', font_size=20, color=GREEN_C).next_to(string_ur.point_from_proportion(0.5), UP + LEFT, buff=0.05)
+
+        angle_arc = Arc(radius=0.4, start_angle=0, angle=45*DEGREES, arc_center=junc)
+        angle_label = MathTex(r'\theta', font_size=18, color=YELLOW_C).next_to(angle_arc, RIGHT, buff=0.05)
+
+        diagram_group = VGroup(string_l, string_d, string_ur, ceiling, block_l, block_l_text, block_d, block_d_text, label_t1_l, label_t1_d, label_t2, angle_arc, angle_label)
+        diagram_group.scale_to_fit_width(frame_width * 0.85)
+        diagram_group.scale_to_fit_height(middle_zone_height * 0.85)
+        diagram_group.move_to(middle_center)
+
+        self.play(Create(string_l), Create(string_d), Create(string_ur), Create(ceiling))
+        self.play(Create(block_l), FadeIn(block_l_text), Create(block_d), FadeIn(block_d_text))
+        self.play(FadeIn(label_t1_l), FadeIn(label_t1_d), FadeIn(label_t2))
+        self.play(Create(angle_arc), FadeIn(angle_label))
         self.wait(1.5)
 
-        # Bottom Zone
-        step_title = Text('วิธีทำ: ตั้งสมการสมดุลแรง', font='TH Sarabun New', font_size=26, color=GOLD_B)
-        eq1 = MathTex(r'T_1 \\cos(30^{\circ}) = T_2 \\cos(45^{\circ})', font_size=26, color=WHITE)
-        eq2 = MathTex(r'T_1 \\sin(30^{\circ}) + T_2 \\sin(45^{\circ}) = 500', font_size=26, color=WHITE)
-        eq3 = MathTex(r'T_1 \approx 366\,\mathrm{N}, \quad T_2 \approx 448\,\mathrm{N}', font_size=26, color=GREEN_C)
+        # Bottom zone: Step 1
+        step1_title = Text('1. หาแรงตึงเชือก T1 จากมวล 8 kg:', font='TH Sarabun New', font_size=26, color=GOLD_B)
+        eq1 = MathTex(r'T_1 = f_{\max} = \mu N = \mu m_1 g', font_size=20, color=WHITE)
+        eq2 = VGroup(
+            MathTex(r'T_1 =', font_size=20),
+            MathTex(r'0.25 \times 8 \times 10 = 20\,\mathrm{N} \quad \text{--- (1)}', font_size=26),
+        ).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        eq2.scale_to_fit_width(frame_width * 0.88)
+        step1_group = VGroup(step1_title, eq1, eq2).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        step1_group.scale_to_fit_width(frame_width * 0.88)
+        step1_group.move_to(bottom_center)
 
-        step_group = VGroup(step_title, eq1, eq2, eq3).arrange(DOWN, aligned_edge=LEFT, buff=0.2)
-        step_group.scale_to_fit_width(frame_width * 0.88)
-        step_group.move_to(bottom_center)
+        self.play(FadeIn(step1_group, shift=UP*0.15))
+        self.wait(2.5)
 
-        self.play(Write(step_title))
-        self.wait(0.8)
-        self.play(Write(eq1))
-        self.wait(0.8)
-        self.play(Write(eq2))
-        self.wait(0.8)
-        self.play(Write(eq3))
-        self.wait(2.0)
+        # Bottom zone: Step 2
+        step2_title = Text('2. หาค่ามวล m จากสมดุลแนวดิ่ง:', font='TH Sarabun New', font_size=26, color=GOLD_B)
+        eq3 = MathTex(r'T_1 = mg \Rightarrow 20 = m(10)', font_size=20, color=WHITE)
+        eq4 = MathTex(r'm = 2\,\mathrm{kg}', font_size=20, color=RED_C)
+        step2_group = VGroup(step2_title, eq3, eq4).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        step2_group.scale_to_fit_width(frame_width * 0.88)
+        step2_group.move_to(bottom_center)
+
+        self.play(FadeOut(step1_group, shift=DOWN*0.15))
+        self.play(FadeIn(step2_group, shift=UP*0.15))
+        self.wait(2.5)
+
+        # Bottom zone: Step 3
+        step3_title = Text('3. หามุม \theta ที่ปมประสาน:', font='TH Sarabun New', font_size=26, color=GOLD_B)
+        eq5 = VGroup(
+            MathTex(r'T_2 \cos \theta =', font_size=20),
+            VGroup(MathTex(r'T_1', font_size=20), Text(' และ ', font='TH Sarabun New', font_size=26), MathTex(r'T_2 \sin \theta = T_1', font_size=20)).arrange(RIGHT, buff=0.1),
+        ).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        eq5.scale_to_fit_width(frame_width * 0.88)
+        eq6 = VGroup(
+            MathTex(r'\tan \theta =', font_size=20),
+            MathTex(r'\frac{T_1}{T_1} = 1 \Rightarrow \theta = 45^\circ', font_size=20),
+        ).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        eq6.scale_to_fit_width(frame_width * 0.88)
+        step3_group = VGroup(step3_title, eq5, eq6).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        step3_group.scale_to_fit_width(frame_width * 0.88)
+        step3_group.move_to(bottom_center)
+
+        self.play(FadeOut(step2_group, shift=DOWN*0.15))
+        self.play(FadeIn(step3_group, shift=UP*0.15))
+        self.wait(3.0)

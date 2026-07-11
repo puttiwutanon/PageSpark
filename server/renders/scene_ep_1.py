@@ -28,63 +28,93 @@ class PhysicsScene(Scene):
         middle_center = np.array([0, middle_zone_center_y, 0])
         bottom_center = np.array([0, bottom_zone_center_y, 0])
 
-        # Top Zone: Title & Problem
-        title = Text('โจทย์ข้อ 9: อัตราส่วนแรงดึงเชือก', font='TH Sarabun New', font_size=28, color=GOLD_B)
-        prob_desc = Text('มวล 10 kg แขวนด้วยเชือก 2 เส้น ยาว 1.5 m และ 2 m ยึดกับเพดานห่างกัน 2.5 m', font='TH Sarabun New', font_size=22, color=GRAY_A)
-        top_group = VGroup(title, prob_desc).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        # Top zone
+        title = Text('โจทย์ข้อ 15: หาอัตราส่วน T1 : T2', font='TH Sarabun New', font_size=28, color=GOLD_B)
+        problem_desc = Text('แขวนมวล 50 kg ไว้ดังรูป จงหาอัตราส่วน T1 : T2', font='TH Sarabun New', font_size=24, color=GRAY_A)
+        top_group = VGroup(title, problem_desc).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
         top_group.scale_to_fit_width(frame_width * 0.88)
         top_group.move_to(top_center)
         self.play(FadeIn(top_group, shift=UP*0.15))
         self.wait(1.0)
 
-        # Middle Zone: Visualization
-        scale_factor = 1.5
-        pA = np.array([-1.25 * scale_factor, 1.0, 0]) + middle_center
-        pB = np.array([1.25 * scale_factor, 1.0, 0]) + middle_center
-        pC = np.array([-0.35 * scale_factor, -0.2 * scale_factor, 0]) + middle_center
+        # Middle zone: Diagram
+        junc = middle_center
+        wall_l = Line(junc + np.array([-2.0, 1.5, 0]), junc + np.array([-2.0, -1.5, 0]), color=GRAY_C)
+        wall_r = Line(junc + np.array([2.0, 1.5, 0]), junc + np.array([2.0, -1.5, 0]), color=GRAY_C)
+        string1 = Line(junc, junc + np.array([-1.5, 1.5, 0]), color=BLUE_C)
+        string2 = Line(junc, junc + np.array([2.0, 0, 0]), color=GREEN_C)
+        string3 = Line(junc, junc + np.array([0, -1.5, 0]), color=RED_C)
+        block = Rectangle(width=1.0, height=0.8, color=RED_C, fill_opacity=0.3).move_to(junc + np.array([0, -1.5, 0]))
+        block_text = Text('50 kg', font='TH Sarabun New', font_size=18, color=WHITE).move_to(block.get_center())
 
-        ceiling = Line(pA, pB, color=GRAY_C, stroke_width=4)
-        ticks = VGroup()
-        for i in range(11):
-            t_pos = pA + (pB - pA) * (i / 10)
-            ticks.add(Line(t_pos, t_pos + np.array([0.1, 0.1, 0]), color=GRAY_C, stroke_width=2))
+        label_t1 = MathTex(r'T_1', font_size=20, color=BLUE_C).next_to(string1.point_from_proportion(0.5), UP + LEFT, buff=0.1)
+        label_t2 = MathTex(r'T_2', font_size=20, color=GREEN_C).next_to(string2.point_from_proportion(0.5), UP, buff=0.1)
+        label_w = MathTex(r'W = 500\,\mathrm{N}', font_size=20, color=RED_C).next_to(block, DOWN, buff=0.1)
 
-        line_AC = Line(pA, pC, color=BLUE_C, stroke_width=4)
-        line_BC = Line(pB, pC, color=GREEN_C, stroke_width=4)
-        
-        mass_line = Line(pC, pC + np.array([0, -1.0, 0]), color=RED_C, stroke_width=4)
-        mass_box = Rectangle(width=0.8, height=0.6, color=RED_C, fill_color=RED_C, fill_opacity=0.3).move_to(pC + np.array([0, -1.3, 0]))
-        mass_text = Text('10 kg', font='TH Sarabun New', font_size=18, color=WHITE).move_to(mass_box.get_center())
+        angle_arc = Arc(radius=0.4, start_angle=180*DEGREES, angle=-45*DEGREES, arc_center=junc)
+        angle_label = MathTex(r'45^\circ', font_size=16, color=YELLOW_C).next_to(angle_arc, UP + LEFT, buff=0.05)
 
-        label_T1 = Text('T1 (1.5 m)', font='TH Sarabun New', font_size=18, color=BLUE_C).next_to(line_AC.get_center(), LEFT, buff=0.1)
-        label_T2 = Text('T2 (2.0 m)', font='TH Sarabun New', font_size=18, color=GREEN_C).next_to(line_BC.get_center(), RIGHT, buff=0.1)
-        label_W = Text('W = 100 N', font='TH Sarabun New', font_size=18, color=RED_C).next_to(mass_box, DOWN, buff=0.1)
+        diagram_group = VGroup(wall_l, wall_r, string1, string2, string3, block, block_text, label_t1, label_t2, label_w, angle_arc, angle_label)
+        diagram_group.scale_to_fit_width(frame_width * 0.85)
+        diagram_group.scale_to_fit_height(middle_zone_height * 0.85)
+        diagram_group.move_to(middle_center)
 
-        vis_group = VGroup(ceiling, ticks, line_AC, line_BC, mass_line, mass_box, mass_text, label_T1, label_T2, label_W)
-        vis_group.scale_to_fit_width(frame_width * 0.85)
-        vis_group.move_to(middle_center)
-
-        self.play(Create(ceiling), Create(ticks))
-        self.play(Create(line_AC), Create(line_BC))
-        self.play(Create(mass_line), Create(mass_box), Write(mass_text))
-        self.play(FadeIn(label_T1), FadeIn(label_T2), FadeIn(label_W))
+        self.play(Create(wall_l), Create(wall_r))
+        self.play(Create(string1), Create(string2), Create(string3))
+        self.play(Create(block), FadeIn(block_text))
+        self.play(FadeIn(label_t1), FadeIn(label_t2), FadeIn(label_w))
+        self.play(Create(angle_arc), FadeIn(angle_label))
         self.wait(1.5)
 
-        # Bottom Zone: Equations
-        step_title = Text('วิธีทำ: ใช้หลักคล้ายของสามเหลี่ยมแรง', font='TH Sarabun New', font_size=26, color=GOLD_B)
-        eq1 = MathTex(r'\frac{T_1}{\mathrm{BC}} = \frac{T_2}{\mathrm{AC}}', font_size=26, color=WHITE)
-        eq2 = MathTex(r'\frac{T_1}{T_2} = \frac{\mathrm{BC}}{\mathrm{AC}}', font_size=26, color=WHITE)
-        eq3 = MathTex(r'\frac{T_1}{T_2} = \frac{2.0}{1.5} = \frac{4}{3}', font_size=26, color=GREEN_C)
+        # Bottom zone: Step 1
+        step1_title = Text('1. พิจารณาแนวแกน Y (สมดุล):', font='TH Sarabun New', font_size=26, color=GOLD_B)
+        eq1 = VGroup(
+            MathTex(r'\Sigma F_y =', font_size=20),
+            MathTex(r'0 \Rightarrow T_1 \sin 45^\circ = W', font_size=20),
+        ).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        eq1.scale_to_fit_width(frame_width * 0.88)
+        eq2 = VGroup(
+            MathTex(r'T_1 \sin 45^\circ =', font_size=20),
+            MathTex(r'500\,\mathrm{N} \quad \text{--- (1)}', font_size=26),
+        ).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        eq2.scale_to_fit_width(frame_width * 0.88)
+        step1_group = VGroup(step1_title, eq1, eq2).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        step1_group.scale_to_fit_width(frame_width * 0.88)
+        step1_group.move_to(bottom_center)
 
-        step_group = VGroup(step_title, eq1, eq2, eq3).arrange(DOWN, aligned_edge=LEFT, buff=0.2)
-        step_group.scale_to_fit_width(frame_width * 0.88)
-        step_group.move_to(bottom_center)
+        self.play(FadeIn(step1_group, shift=UP*0.15))
+        self.wait(2.5)
 
-        self.play(Write(step_title))
-        self.wait(0.8)
-        self.play(Write(eq1))
-        self.wait(0.8)
-        self.play(Write(eq2))
-        self.wait(0.8)
-        self.play(Write(eq3))
-        self.wait(2.0)
+        # Bottom zone: Step 2
+        step2_title = Text('2. พิจารณาแนวแกน X (สมดุล):', font='TH Sarabun New', font_size=26, color=GOLD_B)
+        eq3 = VGroup(
+            MathTex(r'\Sigma F_x =', font_size=20),
+            MathTex(r'0 \Rightarrow T_1 \cos 45^\circ = T_2 \quad \text{--- (2)}', font_size=26),
+        ).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        eq3.scale_to_fit_width(frame_width * 0.88)
+        step2_group = VGroup(step2_title, eq3).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        step2_group.scale_to_fit_width(frame_width * 0.88)
+        step2_group.move_to(bottom_center)
+
+        self.play(FadeOut(step1_group, shift=DOWN*0.15))
+        self.play(FadeIn(step2_group, shift=UP*0.15))
+        self.wait(2.5)
+
+        # Bottom zone: Step 3
+        step3_title = Text('3. หาอัตราส่วน T1 : T2 จากสมการ (2):', font='TH Sarabun New', font_size=26, color=GOLD_B)
+        eq4 = VGroup(
+            Text('จาก (2): ', font='TH Sarabun New', font_size=20, color=WHITE),
+            MathTex(r'T_2 = T_1 \cos 45^\circ', font_size=20, color=WHITE)
+        ).arrange(RIGHT, buff=0.1)
+        eq5 = VGroup(
+            MathTex(r'\frac{T_1}{T_2} =', font_size=20),
+            MathTex(r'\frac{1}{\cos 45^\circ} = \sqrt{2} \approx 1.414', font_size=20),
+        ).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        eq5.scale_to_fit_width(frame_width * 0.88)
+        step3_group = VGroup(step3_title, eq4, eq5).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        step3_group.scale_to_fit_width(frame_width * 0.88)
+        step3_group.move_to(bottom_center)
+
+        self.play(FadeOut(step2_group, shift=DOWN*0.15))
+        self.play(FadeIn(step3_group, shift=UP*0.15))
+        self.wait(3.0)
