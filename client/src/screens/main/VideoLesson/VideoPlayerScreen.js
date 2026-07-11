@@ -7,7 +7,7 @@
  *   - Auto-play when visible
  *   - Pause when not visible
  *   - Episode info overlay (title, question, episode number)
- *   - Video fills entire screen
+ *   - Video fits entire screen without cropping
  *   - Hardware back button support
  */
 
@@ -60,7 +60,6 @@ const VideoPlayerScreen = () => {
   // ── Handle video changes ──────────────────────────────────────────────────
   useEffect(() => {
     if (currentEpisode && player) {
-      // Replace the current video source
       player.replace(currentEpisode.videoUrl);
       player.play();
       setIsPlaying(true);
@@ -129,7 +128,7 @@ const VideoPlayerScreen = () => {
     }
   };
 
-  // Render each video item (just a placeholder - video is rendered once)
+  // Render each video item
   const renderItem = useCallback(({ item, index }) => {
     const isActive = index === currentIndex;
     const duration = item.videoDuration || 0;
@@ -143,12 +142,14 @@ const VideoPlayerScreen = () => {
       <View style={styles.videoContainer}>
         {/* Only show the video player on the active index */}
         {isActive && (
-          <VideoView
-            player={player}
-            style={styles.video}
-            contentFit="cover"
-            nativeControls={false}
-          />
+          <View style={styles.videoWrapper}>
+            <VideoView
+              player={player}
+              style={styles.video}
+              contentFit="contain"
+              nativeControls={false}
+            />
+          </View>
         )}
         
         {/* Overlay Info */}
@@ -303,17 +304,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     position: 'relative',
   },
-  video: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    width: width,
-    height: height,
-    backgroundColor: '#000000',
-  },
-  touchOverlay: {
+  videoWrapper: {
     position: 'absolute',
     top: 0,
     left: 0,
@@ -321,7 +312,22 @@ const styles = StyleSheet.create({
     bottom: 0,
     justifyContent: 'center',
     alignItems: 'center',
-    zIndex: 20,
+    backgroundColor: '#000000',
+  },
+  video: {
+    width: width,
+    height: height,
+    backgroundColor: '#000000',
+  },
+  playOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 50,
   },
   playIconContainer: {
     width: 70,
@@ -338,6 +344,7 @@ const styles = StyleSheet.create({
     right: 0,
     justifyContent: 'flex-end',
     zIndex: 10,
+    pointerEvents: 'none',
   },
   overlayGradient: {
     position: 'absolute',
@@ -415,13 +422,29 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontWeight: '500',
   },
-  swipeHint: {
+  prevBtn: {
+    position: 'absolute',
+    top: 120,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 60,
+  },
+  nextBtn: {
     position: 'absolute',
     bottom: 120,
     left: 0,
     right: 0,
     alignItems: 'center',
-    zIndex: 50,
+    zIndex: 60,
+  },
+  swipeHint: {
+    position: 'absolute',
+    bottom: 80,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 5,
   },
   swipeIndicator: {
     width: 32,

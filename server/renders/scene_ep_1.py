@@ -28,54 +28,63 @@ class PhysicsScene(Scene):
         middle_center = np.array([0, middle_zone_center_y, 0])
         bottom_center = np.array([0, bottom_zone_center_y, 0])
 
-        # 1. Top Zone: Title & Problem
-        title_text = Text('ตอนที่ 1: อัตราส่วนแรงตึงเชือกในสมดุล', font='TH Sarabun New', font_size=28, color=GOLD_B)
-        problem_text = VGroup(
-            Text('แขวนมวล 50 kg ในสถานะสมดุลกล', font='TH Sarabun New', font_size=24, color=GRAY_A),
-            Text('จงหาอัตราส่วนของแรงตึงเชือก T1 : T2', font='TH Sarabun New', font_size=24, color=GRAY_A),
-        ).arrange(DOWN, aligned_edge=LEFT, buff=0.1)
-        top_group = VGroup(title_text, problem_text).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
-        if top_group.width > frame_width * 0.88:
-            top_group.scale_to_fit_width(frame_width * 0.88)
+        # Top Zone: Title & Problem
+        title = Text('โจทย์ข้อ 9: อัตราส่วนแรงดึงเชือก', font='TH Sarabun New', font_size=28, color=GOLD_B)
+        prob_desc = Text('มวล 10 kg แขวนด้วยเชือก 2 เส้น ยาว 1.5 m และ 2 m ยึดกับเพดานห่างกัน 2.5 m', font='TH Sarabun New', font_size=22, color=GRAY_A)
+        top_group = VGroup(title, prob_desc).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+        top_group.scale_to_fit_width(frame_width * 0.88)
         top_group.move_to(top_center)
         self.play(FadeIn(top_group, shift=UP*0.15))
-        self.wait(0.8)
+        self.wait(1.0)
 
-        # 2. Middle Zone: Visualization
-        knot = Dot(point=middle_center, color=WHITE, radius=0.08)
-        t1_arrow = Arrow(start=middle_center, end=middle_center + np.array([-2.2, 2.2, 0]), color=BLUE_C, buff=0)
-        t2_arrow = Arrow(start=middle_center, end=middle_center + np.array([2.2, 0, 0]), color=GREEN_C, buff=0)
-        w_arrow = Arrow(start=middle_center, end=middle_center + np.array([0, -2.2, 0]), color=RED_C, buff=0)
+        # Middle Zone: Visualization
+        scale_factor = 1.5
+        pA = np.array([-1.25 * scale_factor, 1.0, 0]) + middle_center
+        pB = np.array([1.25 * scale_factor, 1.0, 0]) + middle_center
+        pC = np.array([-0.35 * scale_factor, -0.2 * scale_factor, 0]) + middle_center
 
-        t1_label = MathTex(r'T_1', font_size=18, color=BLUE_C).next_to(t1_arrow.get_end(), UP+LEFT, buff=0.1)
-        t2_label = MathTex(r'T_2', font_size=18, color=GREEN_C).next_to(t2_arrow.get_end(), RIGHT, buff=0.1)
-        w_label = MathTex(r'W = 500\,\mathrm{N}', font_size=18, color=RED_C).next_to(w_arrow.get_end(), DOWN, buff=0.1)
+        ceiling = Line(pA, pB, color=GRAY_C, stroke_width=4)
+        ticks = VGroup()
+        for i in range(11):
+            t_pos = pA + (pB - pA) * (i / 10)
+            ticks.add(Line(t_pos, t_pos + np.array([0.1, 0.1, 0]), color=GRAY_C, stroke_width=2))
 
-        angle_arc = Arc(radius=0.6, start_angle=np.pi, angle=np.pi/4, arc_center=middle_center, color=YELLOW_C)
-        angle_label = MathTex(r'45^\circ', font_size=16, color=YELLOW_C).next_to(angle_arc, UP+LEFT, buff=0.05)
+        line_AC = Line(pA, pC, color=BLUE_C, stroke_width=4)
+        line_BC = Line(pB, pC, color=GREEN_C, stroke_width=4)
+        
+        mass_line = Line(pC, pC + np.array([0, -1.0, 0]), color=RED_C, stroke_width=4)
+        mass_box = Rectangle(width=0.8, height=0.6, color=RED_C, fill_color=RED_C, fill_opacity=0.3).move_to(pC + np.array([0, -1.3, 0]))
+        mass_text = Text('10 kg', font='TH Sarabun New', font_size=18, color=WHITE).move_to(mass_box.get_center())
 
-        viz_group = VGroup(knot, t1_arrow, t2_arrow, w_arrow, t1_label, t2_label, w_label, angle_arc, angle_label)
-        viz_group.scale_to_fit_height(middle_zone_height * 0.8)
-        viz_group.move_to(middle_center)
-        self.play(Create(viz_group))
-        self.wait(0.8)
+        label_T1 = Text('T1 (1.5 m)', font='TH Sarabun New', font_size=18, color=BLUE_C).next_to(line_AC.get_center(), LEFT, buff=0.1)
+        label_T2 = Text('T2 (2.0 m)', font='TH Sarabun New', font_size=18, color=GREEN_C).next_to(line_BC.get_center(), RIGHT, buff=0.1)
+        label_W = Text('W = 100 N', font='TH Sarabun New', font_size=18, color=RED_C).next_to(mass_box, DOWN, buff=0.1)
 
-        # 3. Bottom Zone: Equations
-        step_title = Text('ขั้นตอนการคำนวณ:', font='TH Sarabun New', font_size=26, color=GOLD_B)
-        eq1 = MathTex(r'\Sigma F_y = 0 \implies T_1 \sin 45^\circ = 500', font_size=26, color=WHITE)
-        eq2 = MathTex(r'\Sigma F_x = 0 \implies T_1 \cos 45^\circ = T_2', font_size=26, color=WHITE)
-        eq3 = MathTex(r'\frac{T_1}{T_2} = \frac{1}{\cos 45^\circ} = \sqrt{2} \approx 1.414', font_size=26, color=GREEN_C)
+        vis_group = VGroup(ceiling, ticks, line_AC, line_BC, mass_line, mass_box, mass_text, label_T1, label_T2, label_W)
+        vis_group.scale_to_fit_width(frame_width * 0.85)
+        vis_group.move_to(middle_center)
 
-        step_group = VGroup(step_title, eq1, eq2, eq3).arrange(DOWN, aligned_edge=LEFT, buff=0.25)
+        self.play(Create(ceiling), Create(ticks))
+        self.play(Create(line_AC), Create(line_BC))
+        self.play(Create(mass_line), Create(mass_box), Write(mass_text))
+        self.play(FadeIn(label_T1), FadeIn(label_T2), FadeIn(label_W))
+        self.wait(1.5)
+
+        # Bottom Zone: Equations
+        step_title = Text('วิธีทำ: ใช้หลักคล้ายของสามเหลี่ยมแรง', font='TH Sarabun New', font_size=26, color=GOLD_B)
+        eq1 = MathTex(r'\frac{T_1}{\mathrm{BC}} = \frac{T_2}{\mathrm{AC}}', font_size=26, color=WHITE)
+        eq2 = MathTex(r'\frac{T_1}{T_2} = \frac{\mathrm{BC}}{\mathrm{AC}}', font_size=26, color=WHITE)
+        eq3 = MathTex(r'\frac{T_1}{T_2} = \frac{2.0}{1.5} = \frac{4}{3}', font_size=26, color=GREEN_C)
+
+        step_group = VGroup(step_title, eq1, eq2, eq3).arrange(DOWN, aligned_edge=LEFT, buff=0.2)
         step_group.scale_to_fit_width(frame_width * 0.88)
-        step_group.scale_to_fit_height(bottom_zone_height * 0.85)
         step_group.move_to(bottom_center)
 
         self.play(Write(step_title))
-        self.wait(0.5)
+        self.wait(0.8)
         self.play(Write(eq1))
-        self.wait(0.5)
+        self.wait(0.8)
         self.play(Write(eq2))
-        self.wait(0.5)
+        self.wait(0.8)
         self.play(Write(eq3))
-        self.wait(1.5)
+        self.wait(2.0)

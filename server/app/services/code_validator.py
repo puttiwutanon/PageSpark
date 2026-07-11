@@ -13,6 +13,8 @@ Two-phase approach:
 """
 
 import re
+import ast
+import builtins as _builtins_module
 from dataclasses import dataclass, field
 
 
@@ -915,6 +917,159 @@ def _detect_math_errors(lines: list[str]) -> list[Violation]:
     return violations
 
 
+def _detect_undefined_variables(code: str) -> list[Violation]:
+    """
+    Catch NameError-causing bugs *before* Manim render: variables that are
+    used (e.g. inside a VGroup(...) call) but never assigned anywhere in the
+    script, or used before their first assignment.
+
+    This exists mainly as a safety net for auto-fix/line-patch bugs that can
+    silently drop a variable's definition line (e.g. a targeted Gemini patch
+    that only echoes back the line it was asked to fix, dropping a sibling
+    definition that happened to sit in the same context window). Catching it
+    here means the pipeline gets another retry instead of a hard render crash.
+
+    Deliberately conservative to avoid false positives:
+      - Only checks bare lowercase/snake_case identifiers (regex
+        ^[a-z_][a-z0-9_]*$). Manim/numpy library symbols are virtually always
+        PascalCase (Text, VGroup, MathTex, Circle) or ALL_CAPS (UP, BLUE_D,
+        ORIGIN), so this naturally excludes them without needing a full
+        manim symbol table.
+      - Whitelists Python builtins, any imported names, and a short list of
+        known lowercase manim/numpy globals (self, config, np, and common
+        rate functions) that are legitimately used without local assignment.
+      - Only reports each offending name once, and only for the *first*
+        genuinely undefined/used-too-early occurrence.
+    """
+    violations: list[Violation] = []
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return violations  # syntax errors are already caught elsewhere
+
+    known_globals = {
+        "self", "cls", "config", "np",
+        # common lowercase manim rate-functions / helpers pulled in via
+        # `from manim import *` that are never locally assigned
+        "smooth", "linear", "there_and_back", "there_and_back_with_pause",
+        "running_start", "not_quite_there", "wiggle", "squish_rate_func",
+        "lingering", "exponential_decay", "double_smooth", "rush_into",
+        "rush_from", "slow_into", "always_redraw", "always_shift",
+        "always_rotate", "always_scale", "turn_animation_into_updater",
+        "interpolate", "rate_functions",
+    }
+
+    assigned_at: dict[str, int] = {}
+    imported: set[str] = set()
+
+    def _record(name: str, lineno: int) -> None:
+        if name not in assigned_at or lineno < assigned_at[name]:
+            assigned_at[name] = lineno
+
+    class DefCollector(ast.NodeVisitor):
+        def visit_Import(self, node):
+            for alias in node.names:
+                imported.add(alias.asname or alias.name.split(".")[0])
+            self.generic_visit(node)
+
+        def visit_ImportFrom(self, node):
+            for alias in node.names:
+                if alias.name != "*":
+                    imported.add(alias.asname or alias.name)
+            self.generic_visit(node)
+
+        def _record_targets(self, target, lineno):
+            for n in ast.walk(target):
+                if isinstance(n, ast.Name):
+                    _record(n.id, lineno)
+
+        def visit_Assign(self, node):
+            for target in node.targets:
+                self._record_targets(target, node.lineno)
+            self.generic_visit(node)
+
+        def visit_AugAssign(self, node):
+            self._record_targets(node.target, node.lineno)
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node):
+            self._record_targets(node.target, node.lineno)
+            self.generic_visit(node)
+
+        def visit_For(self, node):
+            self._record_targets(node.target, node.lineno)
+            self.generic_visit(node)
+
+        def visit_With(self, node):
+            for item in node.items:
+                if item.optional_vars:
+                    self._record_targets(item.optional_vars, node.lineno)
+            self.generic_visit(node)
+
+        def visit_FunctionDef(self, node):
+            _record(node.name, node.lineno)
+            for arg in node.args.args:
+                _record(arg.arg, node.lineno)
+            self.generic_visit(node)
+
+        def visit_Lambda(self, node):
+            for arg in node.args.args:
+                _record(arg.arg, node.lineno)
+            self.generic_visit(node)
+
+        def _comp(self, node):
+            for gen in node.generators:
+                self._record_targets(gen.target, node.lineno)
+            self.generic_visit(node)
+
+        visit_ListComp = _comp
+        visit_SetComp = _comp
+        visit_DictComp = _comp
+        visit_GeneratorExp = _comp
+
+    DefCollector().visit(tree)
+
+    whitelist = set(dir(_builtins_module)) | imported | known_globals
+    name_pattern = re.compile(r"^[a-z_][a-z0-9_]*$")
+    reported: set[str] = set()
+
+    class UseCollector(ast.NodeVisitor):
+        def visit_Name(self, node):
+            if isinstance(node.ctx, ast.Load):
+                name = node.id
+                if name not in whitelist and name_pattern.match(name) and name not in reported:
+                    first_def = assigned_at.get(name)
+                    if first_def is None:
+                        violations.append(Violation(
+                            rule="UNDEFINED_VARIABLE",
+                            line=node.lineno,
+                            snippet=name,
+                            description=(
+                                f"ตัวแปร '{name}' ถูกใช้งานแต่ไม่เคยถูกกำหนดค่าที่ไหนเลยในโค้ด "
+                                "(อาจถูกลบทิ้งโดยไม่ได้ตั้งใจระหว่างการแก้บั๊กอัตโนมัติ) "
+                                "จะทำให้เกิด NameError ตอนเรนเดอร์"
+                            ),
+                        ))
+                        reported.add(name)
+                    elif first_def > node.lineno:
+                        violations.append(Violation(
+                            rule="UNDEFINED_VARIABLE",
+                            line=node.lineno,
+                            snippet=name,
+                            description=(
+                                f"ตัวแปร '{name}' ถูกใช้งานที่บรรทัด {node.lineno} "
+                                f"ก่อนที่จะถูกกำหนดค่าครั้งแรกที่บรรทัด {first_def} — "
+                                "จะทำให้เกิด NameError ตอนเรนเดอร์"
+                            ),
+                        ))
+                        reported.add(name)
+            self.generic_visit(node)
+
+    UseCollector().visit(tree)
+    return violations
+
+
 def _detect_missing_scaling(lines: list[str]) -> list[Violation]:
     """
     Detect VGroups in bottom/middle zone without scaling.
@@ -1144,6 +1299,7 @@ def preprocess_code(code_string: str) -> ValidationResult:
     violations.extend(_detect_missing_scaling(lines))
     violations.extend(_detect_font_size_violations(lines))
     violations.extend(_detect_bottom_zone_empty(lines))
+    violations.extend(_detect_undefined_variables(code))
 
     return ValidationResult(
         fixed_code=code,

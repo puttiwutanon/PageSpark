@@ -82,8 +82,8 @@ def smart_json_sanitize(raw: str) -> str:
     # We need to double all backslashes that are part of LaTeX commands
     
     # Find all string content in the JSON
-    def fix_string_content(match):
-        content = match.group(0)
+    def fix_string_content(content):
+        # `content` is already the captured string (m.group(1)) — not a match object.
         # Double backslashes that are part of LaTeX commands
         # but only if they're not already doubled
         latex_commands = [
@@ -200,6 +200,12 @@ LINE_FIX_PROMPT_TEMPLATE = """
 
 ══ กฎเหล็ก — ดูตัวอย่างก่อน/หลังแล้วแก้ตามนี้เสมอ ══
 
+⚠️ สำคัญที่สุด: context ที่แสดงให้ดูมีไว้เพื่อให้คุณเข้าใจชื่อตัวแปรที่เกี่ยวข้องเท่านั้น
+ห้ามคืนค่า context เหล่านั้นซ้ำ และห้ามลบ/แก้ไขบรรทัดอื่นที่ไม่ใช่บรรทัดที่ระบุไว้โดยเด็ดขาด
+คำตอบของคุณสำหรับแต่ละ context_id ต้องเป็น "ตัวแทนใหม่ของบรรทัดที่ถูกชี้เป้าเท่านั้น" —
+ถ้าต้องเพิ่มบรรทัดใหม่ (เช่นเพิ่ม .scale_to_fit_width() ต่อท้าย) ให้เพิ่มเป็นบรรทัดถัดจากบรรทัดเดิม
+ในลิสต์เดียวกันได้ แต่ห้ามพิมพ์ซ้ำบรรทัดใดๆ ที่อยู่ก่อนหรือหลังบรรทัดเป้าหมายในหน้าต่าง context
+
 ❌ WRONG — aligned_edge=CENTER:
     VGroup(...).arrange(DOWN, aligned_edge=CENTER, buff=0.15)
 ✅ CORRECT:
@@ -208,8 +214,14 @@ LINE_FIX_PROMPT_TEMPLATE = """
 ❌ WRONG — LaTeX ใน Text(): Text('หาความยาวคลื่น (\\lambda)', ...)
 ✅ CORRECT: Text('หาความยาวคลื่น (λ)', ...)
 
-ส่งคืนเฉพาะ JSON:
-{{"fixes": {{"<context_id>": ["บรรทัดที่แก้ 1", "บรรทัดที่แก้ 2"]}}}}
+❌ WRONG — MISSING_SCALING, บรรทัดเป้าหมายคือ:
+    step1_group = VGroup(step1_title, eq1).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+✅ CORRECT — คืนค่าเป็น 2 บรรทัดแทนบรรทัดเป้าหมายบรรทัดเดียว (ไม่แตะบรรทัดอื่น):
+    ["        step1_group = VGroup(step1_title, eq1).arrange(DOWN, aligned_edge=LEFT, buff=0.15)",
+     "        step1_group.scale_to_fit_width(frame_width * 0.88)"]
+
+ส่งคืนเฉพาะ JSON โดยแต่ละ context_id คือ "บรรทัดทดแทนของบรรทัดเป้าหมายเท่านั้น" (1 บรรทัดขึ้นไป):
+{{"fixes": {{"<context_id>": ["บรรทัดที่แก้ 1", "บรรทัดที่แก้ 2 (ถ้ามี)"]}}}}
 """
 
 
@@ -423,10 +435,15 @@ class Manim_Engine:
             blocks.append(
                 f"--- context_id: {ctx_id} ---\n"
                 f"[{v.rule}] {v.description}\n"
-                f"บรรทัดที่ต้องแก้คือบรรทัด {v.line} (อยู่ในช่วงด้านล่าง):\n"
+                f"บรรทัดที่ต้องแก้คือบรรทัด {v.line} เท่านั้น "
+                f"(context ด้านล่างมีไว้ให้ดูชื่อตัวแปรที่เกี่ยวข้อง ห้ามคืนค่าบรรทัดอื่นนอกจากบรรทัด {v.line}):\n"
                 f"{numbered}\n"
             )
-            replace_ranges[ctx_id] = (start, end)
+            # IMPORTANT: only the single flagged line is ever spliced back in,
+            # never the full context window — this guarantees neighboring
+            # lines (e.g. variable definitions used by the flagged line)
+            # can never be silently dropped by a short Gemini response.
+            replace_ranges[ctx_id] = (line_idx, line_idx)
 
         prompt = LINE_FIX_PROMPT_TEMPLATE.format(
             violation_blocks="\n".join(blocks)
