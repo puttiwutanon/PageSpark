@@ -1,0 +1,16 @@
+# server/.dockerignore
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+*.db
+*.sqlite3
+renders/
+.git
+.venv
+venv
+.idea
+.vscode
+*.log
