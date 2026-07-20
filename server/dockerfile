@@ -6,8 +6,11 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies for Manim, LaTeX, and ffmpeg
+# Install system dependencies (including build tools)
 RUN apt-get update && apt-get install -y \
+    build-essential \
+    gcc \
+    g++ \
     ffmpeg \
     texlive \
     texlive-latex-extra \
@@ -15,29 +18,44 @@ RUN apt-get update && apt-get install -y \
     texlive-science \
     python3-pygments \
     libcairo2 \
+    libcairo2-dev \
     libpango-1.0-0 \
+    libpango1.0-dev \
     libpangocairo-1.0-0 \
     libgdk-pixbuf-2.0-0 \
     libffi-dev \
     shared-mime-info \
+    libjpeg-dev \
+    zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy requirements first for better caching
+# Copy requirements first
 COPY requirements.txt .
 
-# Install Python dependencies
+# Upgrade pip and install wheel
+RUN pip install --upgrade pip wheel setuptools
+
+# Install manim with pre-built wheels (faster)
+RUN pip install --no-cache-dir \
+    numpy==1.26.0 \
+    Pillow==10.1.0 \
+    scipy==1.11.4 \
+    manim==0.18.1
+
+# Install other dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application
+# Copy the rest
 COPY . .
 
 # Create renders directory
 RUN mkdir -p renders
 
-# Expose the port
 EXPOSE 8000
 
-# Run the application
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD curl -f http://localhost:8000/api/health || exit 1
