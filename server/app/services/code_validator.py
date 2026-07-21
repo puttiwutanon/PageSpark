@@ -493,38 +493,6 @@ def _fix_axes_too_large(code: str, fixes: list[str]) -> str:
     return code
 
 
-def _detect_axes_too_large(lines: list[str]) -> list[Violation]:
-    violations = []
-    for i, line in enumerate(lines, 1):
-        m = re.search(r'x_length\s*=\s*([0-9.]+)', line)
-        if m:
-            try:
-                val = float(m.group(1))
-                if val > 5.4:
-                    violations.append(Violation(
-                        rule="AXES_TOO_LARGE",
-                        line=i,
-                        snippet=line.strip()[:80],
-                        description=f"x_length={val} เกิน 5.4 — ใช้ frame_width * 0.60"
-                    ))
-            except ValueError:
-                pass
-        m = re.search(r'y_length\s*=\s*([0-9.]+)', line)
-        if m:
-            try:
-                val = float(m.group(1))
-                if val > 4.3:
-                    violations.append(Violation(
-                        rule="AXES_TOO_LARGE",
-                        line=i,
-                        snippet=line.strip()[:80],
-                        description=f"y_length={val} เกิน 4.3 — ใช้ middle_zone_height * 0.65"
-                    ))
-            except ValueError:
-                pass
-    return violations
-
-
 def _fix_font_size_too_large(code: str, fixes: list[str]) -> str:
     """Clamp font_size on Text() to 28, and MathTex() to 20 (perfect size for mobile vertical video)."""
     
@@ -666,6 +634,65 @@ def _fix_mathrm_curly_braces(code: str, fixes: list[str]) -> str:
         fixes.append("AUTO-FIX: Removed empty \\mathrm{}")
         code = code.replace(r'\\mathrm{}', '')
     return code
+
+
+def _fix_enforce_zone_clamping(code: str, fixes: list[str]) -> str:
+    """
+    Deterministically guarantee scale_to_fit_width/height before every
+    .move_to(top_center / middle_center / bottom_center), regardless of
+    whether Gemini remembered to add clamping itself.
+    """
+    zone_configs = {
+        'top_center': ('frame_width * 0.88', 'top_zone_height * 0.88'),
+        'middle_center': ('frame_width * 0.88', 'middle_zone_height * 0.82'),
+        'bottom_center': ('frame_width * 0.88', 'bottom_zone_height * 0.88'),
+    }
+    lines = code.splitlines()
+    out = []
+    move_to_pattern = re.compile(r'^(\s*)(\w+)\.move_to\((top_center|middle_center|bottom_center)\)\s*$')
+
+    for line in lines:
+        m = move_to_pattern.match(line)
+        if m:
+            indent, var, zone = m.groups()
+            w_expr, h_expr = zone_configs[zone]
+
+            # Scan back through everything already emitted to find THIS
+            # variable's assignment line, then only look for an existing
+            # scale_to_fit_width call between that assignment and here.
+            # This fixes two bugs from the fixed 6-line-window version:
+            #   (a) false negative: a legitimate double-clamp block (scale
+            #       width, scale height, min-width check, min-height check)
+            #       can run 6-8+ lines and fall outside a fixed window,
+            #       causing a redundant (harmless but wasteful) re-clamp.
+            #   (b) false positive: checking `f'{var}.scale_to_fit_width'
+            #       not in recent` as a plain substring means var='group'
+            #       incorrectly matches inside 'sub_group.scale_to_fit_width',
+            #       causing 'group' to be silently skipped and left
+            #       unclamped — the exact overflow bug this fixer exists
+            #       to prevent.
+            assign_pattern = re.compile(rf'(?<![\w.]){re.escape(var)}\s*=')
+            scan_start = 0
+            for idx in range(len(out) - 1, -1, -1):
+                if assign_pattern.search(out[idx]):
+                    scan_start = idx
+                    break
+
+            already_scaled_pattern = re.compile(
+                rf'(?<![\w.]){re.escape(var)}\.scale_to_fit_width\s*\('
+            )
+            recent = "\n".join(out[scan_start:])
+            already_scaled = bool(already_scaled_pattern.search(recent))
+
+            if not already_scaled:
+                out.append(f"{indent}if {var}.width > {w_expr}:")
+                out.append(f"{indent}    {var}.scale_to_fit_width({w_expr})")
+                out.append(f"{indent}if {var}.height > {h_expr}:")
+                out.append(f"{indent}    {var}.scale_to_fit_height({h_expr})")
+                fixes.append(f"AUTO-FIX: Force-clamped '{var}' before .move_to({zone})")
+        out.append(line)
+    return '\n'.join(out)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1366,6 +1393,7 @@ def preprocess_code(code_string: str) -> ValidationResult:
     code = _fix_indicate_flash(code, auto_fixes)
     code = _fix_font_in_mathtex(code, auto_fixes)
     code = _fix_aligned_edge_center(code, auto_fixes)
+    code = _fix_enforce_zone_clamping(code, auto_fixes) 
     
     # 2. Variable/value fixes
     code = _fix_bottom_zone_bottom(code, auto_fixes)

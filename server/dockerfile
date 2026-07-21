@@ -1,12 +1,10 @@
 # server/Dockerfile
 FROM python:3.11-slim
 
-# Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies (including build tools)
 RUN apt-get update && apt-get install -y \
     build-essential \
     gcc \
@@ -27,30 +25,48 @@ RUN apt-get update && apt-get install -y \
     shared-mime-info \
     libjpeg-dev \
     zlib1g-dev \
+    fontconfig \
+    wget \
     && rm -rf /var/lib/apt/lists/*
+
+# ── Install TH Sarabun New — direct .ttf files, no zip/unzip needed ──
+# Source: Phonbopit/sarabun-webfont (GitHub), which packages the actual
+# TH Sarabun New family (not the different "TH Sarabun PSK" family — those
+# are two distinct fonts with different internal names, so don't swap this
+# for a "PSK" source or Pango will fail the lookup the same way as before).
+RUN mkdir -p /usr/share/fonts/truetype/thsarabun \
+    && wget -q --tries=3 -O /usr/share/fonts/truetype/thsarabun/THSarabunNew.ttf \
+        "https://raw.githubusercontent.com/Phonbopit/sarabun-webfont/master/fonts/thsarabunnew-webfont.ttf" \
+    && wget -q --tries=3 -O /usr/share/fonts/truetype/thsarabun/THSarabunNew-Bold.ttf \
+        "https://raw.githubusercontent.com/Phonbopit/sarabun-webfont/master/fonts/thsarabunnew_bold-webfont.ttf" \
+    && wget -q --tries=3 -O /usr/share/fonts/truetype/thsarabun/THSarabunNew-Italic.ttf \
+        "https://raw.githubusercontent.com/Phonbopit/sarabun-webfont/master/fonts/thsarabunnew_italic-webfont.ttf" \
+    && wget -q --tries=3 -O /usr/share/fonts/truetype/thsarabun/THSarabunNew-BoldItalic.ttf \
+        "https://raw.githubusercontent.com/Phonbopit/sarabun-webfont/master/fonts/thsarabunnew_bolditalic-webfont.ttf" \
+    # Fail the build loudly if any file is missing/empty instead of shipping
+    # a broken font silently — this is the check your original build was
+    # missing entirely.
+    && for f in THSarabunNew THSarabunNew-Bold THSarabunNew-Italic THSarabunNew-BoldItalic; do \
+         test -s /usr/share/fonts/truetype/thsarabun/$f.ttf || (echo "MISSING/EMPTY FONT FILE: $f.ttf" && exit 1); \
+       done \
+    && fc-cache -f -v
 
 WORKDIR /app
 
-# Copy requirements first
 COPY requirements.txt .
 
-# Upgrade pip and install wheel
 RUN pip install --upgrade pip wheel setuptools
 
-# Install manim with pre-built wheels (faster)
 RUN pip install --no-cache-dir \
     numpy==1.26.0 \
     Pillow==10.1.0 \
     scipy==1.11.4 \
     manim==0.18.1
 
-# Install other dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest
 COPY . .
 
-# Create renders directory
 RUN mkdir -p renders
 
 EXPOSE 8000
