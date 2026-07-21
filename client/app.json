@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "client",
+    "name": "PageSpark",
     "slug": "client",
     "androidStatusBar": {
       "hidden": true
@@ -10,17 +10,17 @@
     },
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/PageSpark_icon.png",
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "backgroundColor": "#ffffff",
+        "foregroundImage": "./assets/PageSpark_icon.png",
+        "backgroundImage": "./assets/PageSpark_icon.png",
+        "monochromeImage": "./assets/PageSpark_icon.png"
       },
       "package": "com.puttiwutanon.client"
     },

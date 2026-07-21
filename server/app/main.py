@@ -78,6 +78,27 @@ class QuizResponseSchema(BaseModel):
     quizzes: List[QuizItemSchema]
 
 
+from google.genai.errors import ClientError, ServerError
+
+def get_friendly_error_message(e: Exception) -> str:
+    error_str = str(e).lower()
+    
+    if "429" in error_str or "resource_exhausted" in error_str or "quota" in error_str:
+        if "per day" in error_str or "daily" in error_str:
+            return "คุณใช้โควต้ารายวันหมดแล้ว กรุณาลองใหม่พรุ่งนี้ (Daily request limit reached — try again tomorrow)"
+        return "มีการเรียกใช้งานถี่เกินไป กรุณารอสักครู่แล้วลองใหม่ (Rate limit hit — please wait a moment and retry)"
+    
+    if "503" in error_str or "unavailable" in error_str or "overloaded" in error_str:
+        return "โมเดลกำลังมีผู้ใช้งานหนาแน่น กรุณาลองใหม่อีกครั้งในภายหลัง (Model is experiencing high demand — please try again later)"
+    
+    if "500" in error_str or "internal" in error_str:
+        return "เกิดข้อผิดพลาดจากฝั่งเซิร์ฟเวอร์ Gemini กรุณาลองใหม่ (Gemini server error — please retry)"
+    
+    if "400" in error_str or "invalid" in error_str:
+        return "รูปภาพหรือข้อมูลที่ส่งไปมีปัญหา กรุณาลองถ่ายรูปใหม่ (Invalid input — try a clearer photo)"
+    
+    return f"เกิดข้อผิดพลาดที่ไม่คาดคิด: {str(e)[:100]}"
+
 @app.post("/api/generate-quiz", response_model=QuizResponseSchema)
 async def generate_quiz(request: QuizRequest):
     """Generate custom academic physics quiz questions."""
@@ -117,8 +138,9 @@ async def generate_quiz(request: QuizRequest):
         return parsed_data
 
     except Exception as e:
-        logger.error(f"generate_quiz failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"❌ generate_video error: {e}", exc_info=True)
+        friendly_msg = get_friendly_error_message(e)
+        raise HTTPException(status_code=500, detail=friendly_msg)
 
 
 @app.post("/api/ingest")
@@ -173,7 +195,9 @@ async def ingest_and_summarize(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"❌ generate_video error: {e}", exc_info=True)
+        friendly_msg = get_friendly_error_message(e)
+        raise HTTPException(status_code=500, detail=friendly_msg)
 
     finally:
         if temp_path and os.path.exists(temp_path):
@@ -236,9 +260,9 @@ async def generate_video(
             question_titles = count_data.get("question_titles", [])
             logger.info(f"✅ Pre-scan found {expected_count} question(s): {question_titles}")
         except Exception as e:
-            logger.warning(f"⚠️ Pre-scan failed ({e}), defaulting to 1 episode")
-            expected_count = 1
-            question_titles = []
+            logger.error(f"❌ generate_video error: {e}", exc_info=True)
+            friendly_msg = get_friendly_error_message(e)
+            raise HTTPException(status_code=500, detail=friendly_msg)
         finally:
             try:
                 client.files.delete(name=gemini_file_for_count.name)
