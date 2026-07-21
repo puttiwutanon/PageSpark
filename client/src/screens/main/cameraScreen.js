@@ -35,7 +35,7 @@ const CameraScreen = () => {
     const { user } = useAuth();
 
     // Your ngrok URL - make sure this is correct
-    const API_BASE_URL = 'https://pamphlet-manmade-abridge.ngrok-free.dev';
+    const API_BASE_URL = 'https://pagespark-api-663555450350.asia-southeast1.run.app';
 
     // ── Camera Permissions ────────────────────────────────────────────────────
 

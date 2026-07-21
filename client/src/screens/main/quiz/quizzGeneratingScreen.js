@@ -37,7 +37,7 @@ const PHYSICS_TOPICS = [
 
 const COUNT_OPTIONS = [5, 10, 15, 20, 25, 30];
 
-const API_BASE = 'https://pamphlet-manmade-abridge.ngrok-free.dev';
+const API_BASE = 'https://pagespark-api-663555450350.asia-southeast1.run.app';
 
 // ── Main Component ────────────────────────────────────────────────────────────
 
