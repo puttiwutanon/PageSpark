@@ -1,8 +1,26 @@
 # server/app/core/prompts.py
 #
-# v2: Added MANIM_CODE_RULES block at the TOP of LESSON_SUMMARY_SYSTEM_INSTRUCTION.
-# This is placed FIRST because Gemini gives more weight to early context.
-# The rules use concrete ❌/✅ examples for every violation we've seen in production.
+# v3: Fixed internal contradictions flagged in friend feedback (2026-09):
+#   - MathTex font_size: table 5F said "≤20 absolute" while every code example
+#     used 26, and the Title row even allowed MathTex=28. code_validator.py's
+#     _fix_font_size_too_large() has always enforced a hard, non-zone-aware
+#     clamp of MathTex→20 / Text→28 everywhere. The prompt now matches that
+#     reality exactly instead of describing zone exceptions the code doesn't
+#     honor — every MathTex example below is font_size=20.
+#   - Episode duration: rule 3 said "≥30s", rule 10.1 said "≥60s" then
+#     "sum of segments ≥30s", checklist said "≥60s". Standardized on 60s
+#     everywhere, matching the checklist (the one value actually enforced).
+#   - segment_duration_seconds is explicitly called out as an internal calc
+#     value used to derive start/end times — NOT a JSON output key — since
+#     the JSON schema in section 7 never had a slot for it.
+#   - source_problem_summary changed from ["string"] | null to "string" | null
+#     to match the instruction text, which always described a single summary,
+#     not a list.
+#   - Axes x_length/y_length caps corrected to 5.4 / 4.3 everywhere (previously
+#     rule 9 said "error if > 5.85 / 4.68" while the worked example and the
+#     actual code_validator.py clamp both use 5.4 / 4.3, and the checklist
+#     said yet a third number, 0.65). code_validator.py's real clamp is the
+#     source of truth; the prompt text and checklist now match it.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared Manim code rules — injected into every generation prompt
@@ -45,8 +63,11 @@ _MANIM_CODE_RULES = r"""
 ✅ CORRECT option B — แยก MathTex สำหรับสัญลักษณ์ที่ซับซ้อน:
     step_title = VGroup(
         Text('หาความยาวคลื่น', font='TH Sarabun New', font_size=26, color=GOLD_B),
-        MathTex(r'\lambda', font_size=26, color=GOLD_B),
+        MathTex(r'\lambda', font_size=20, color=GOLD_B),
     ).arrange(RIGHT, buff=0.1)
+
+หมายเหตุ: MathTex() ห้ามใช้ font_size เกิน 20 เสมอ ไม่ว่าจะอยู่โซนไหนของจอ
+(Top/Middle/Bottom) — ดูกฎ 10 และตาราง 5F สำหรับรายละเอียดเต็ม
 
 Unicode อ้างอิงสำหรับ Text():
   λ=\\u03bb  φ=\\u03c6  θ=\\u03b8  α=\\u03b1  β=\\u03b2  γ=\\u03b3
@@ -58,24 +79,24 @@ Unicode อ้างอิงสำหรับ Text():
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ❌ WRONG (LaTeX ไม่รองรับภาษาไทย):
-    MathTex(r'\mathrm{ก.\,} t = 5\,\mathrm{วินาที}', font_size=26)
-    MathTex(r'v = 256\,\mathrm{เมตร/วินาที}', font_size=26)
-    MathTex(r'\mathrm{รอบ} = 3', font_size=26)
+    MathTex(r'\mathrm{ก.\,} t = 5\,\mathrm{วินาที}', font_size=20)
+    MathTex(r'v = 256\,\mathrm{เมตร/วินาที}', font_size=20)
+    MathTex(r'\mathrm{รอบ} = 3', font_size=20)
 
 ✅ CORRECT — แยก Thai ออกเป็น Text():
     answer_a = VGroup(
         Text('ก.', font='TH Sarabun New', font_size=26, color=GRAY_A),
-        MathTex(r't = 5\,\mathrm{s}', font_size=26, color=GREEN_C),
+        MathTex(r't = 5\,\mathrm{s}', font_size=20, color=GREEN_C),
     ).arrange(RIGHT, buff=0.15)
 
     v_result = VGroup(
-        MathTex(r'v = 256', font_size=26, color=GREEN_C),
+        MathTex(r'v = 256', font_size=20, color=GREEN_C),
         Text('เมตร/วินาที', font='TH Sarabun New', font_size=26, color=GREEN_C),
     ).arrange(RIGHT, buff=0.1)
 
     # ✅ หน่วยในสูตร — ใช้ mathrm ได้ถ้าเป็น ASCII เท่านั้น:
-    MathTex(r'v = 256\,\mathrm{m/s}', font_size=26, color=GREEN_C)  # ← ถูก
-    MathTex(r'\lambda = 0.80\,\mathrm{m}', font_size=26, color=GREEN_C)  # ← ถูก
+    MathTex(r'v = 256\,\mathrm{m/s}', font_size=20, color=GREEN_C)  # ← ถูก
+    MathTex(r'\lambda = 0.80\,\mathrm{m}', font_size=20, color=GREEN_C)  # ← ถูก
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 กฎ 4: ห้าม .arrange(RIGHT) กับ Text ไทยยาว (> 15 ตัวอักษร)
@@ -84,19 +105,19 @@ Unicode อ้างอิงสำหรับ Text():
 ❌ WRONG (ล้น frame_width=9.0):
     VGroup(
         Text('ก. เวลาที่วัตถุตกถึงพื้น:', font='TH Sarabun New', font_size=26),
-        MathTex(r't = 5\,\mathrm{s}', font_size=26),
+        MathTex(r't = 5\,\mathrm{s}', font_size=20),
     ).arrange(RIGHT, buff=0.15)
 
 ✅ CORRECT — ใช้ DOWN สำหรับ Thai label ยาว:
     VGroup(
         Text('ก. เวลาที่วัตถุตกถึงพื้น:', font='TH Sarabun New', font_size=26, color=GRAY_A),
-        MathTex(r't = 5\,\mathrm{s}', font_size=26, color=GREEN_C),
+        MathTex(r't = 5\,\mathrm{s}', font_size=20, color=GREEN_C),
     ).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
 
 ✅ หรือย่อ label ให้สั้นแล้วใช้ RIGHT ได้:
     VGroup(
         Text('ก. t =', font='TH Sarabun New', font_size=26, color=GRAY_A),
-        MathTex(r'5\,\mathrm{s}', font_size=26, color=GREEN_C),
+        MathTex(r'5\,\mathrm{s}', font_size=20, color=GREEN_C),
     ).arrange(RIGHT, buff=0.1)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -117,13 +138,13 @@ Unicode อ้างอิงสำหรับ Text():
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ❌ WRONG (Python จะตีความ \f \t \n ผิด):
-    MathTex('\frac{1}{2}', font_size=26)
-    MathTex('\theta = 30', font_size=26)
+    MathTex('\frac{1}{2}', font_size=20)
+    MathTex('\theta = 30', font_size=20)
 
 ✅ CORRECT — ใช้ r-string หรือ double backslash:
-    MathTex(r'\frac{1}{2}', font_size=26)
-    MathTex(r'\theta = 30^{\circ}', font_size=26)
-    MathTex(r'v = f\lambda', font_size=26)
+    MathTex(r'\frac{1}{2}', font_size=20)
+    MathTex(r'\theta = 30^{\circ}', font_size=20)
+    MathTex(r'v = f\lambda', font_size=20)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 กฎ 7: API เวอร์ชัน — ห้ามใช้ของเก่า
@@ -157,50 +178,54 @@ string ปกติ ดังนั้นถ้าใน source มี backslash
 
 ตัวอย่าง JSON ที่ถูก (2 backslash ใน JSON → 1 backslash ใน source → \frac ใน LaTeX):
   "manim_code_lines": [
-    "        eq1 = MathTex(r'\\\\frac{1}{2}g t^2', font_size=26, color=BLUE_C)",
-    "        eq2 = MathTex(r'\\\\lambda = 0.80\\\\,\\\\mathrm{m}', font_size=26)"
+    "        eq1 = MathTex(r'\\\\frac{1}{2}g t^2', font_size=20, color=BLUE_C)",
+    "        eq2 = MathTex(r'\\\\lambda = 0.80\\\\,\\\\mathrm{m}', font_size=20)"
   ]
 เมื่อ decode JSON แล้ว บรรทัด source code ที่ได้ต้องมี backslash แค่ 1 ตัวเท่านั้น:
-  eq1 = MathTex(r'\frac{1}{2}g t^2', font_size=26, color=BLUE_C)
-  eq2 = MathTex(r'\lambda = 0.80\,\mathrm{m}', font_size=26)
+  eq1 = MathTex(r'\frac{1}{2}g t^2', font_size=20, color=BLUE_C)
+  eq2 = MathTex(r'\lambda = 0.80\,\mathrm{m}', font_size=20)
 
 ❌ ห้ามเขียน JSON แบบนี้ (4 backslash ใน JSON) เพราะจะได้ 2 backslash ใน source
 ซึ่งพัง LaTeX ทันที:
-  "eq1 = MathTex(r'\\\\\\\\frac{1}{2}g t^2', font_size=26, color=BLUE_C)"   ← ผิด!
+  "eq1 = MathTex(r'\\\\\\\\frac{1}{2}g t^2', font_size=20, color=BLUE_C)"   ← ผิด!
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 กฎ 9: Axes ห้ามใหญ่เกินขนาด zone — กำหนด x_length/y_length ตามนี้เท่านั้น
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ระบบจะ ERROR ทันทีถ้า x_length เกิน 5.85 หรือ y_length เกิน 4.68
+ระบบจะ ERROR ทันทีถ้า x_length เกิน 5.4 หรือ y_length เกิน 4.3
+(ตัวเลขนี้คือค่าที่ code_validator.py บังคับ clamp จริง — ห้ามคำนวณสูตรอื่นที่ให้
+ค่าเกินนี้ ไม่ว่าจะดูสมเหตุสมผลแค่ไหน)
 
 ❌ WRONG:
     axes = Axes(
         x_range=[0, 10, 1],
-        x_length=7.5,             # เกิน 5.85!
-        y_length=5.5,              # เกิน 4.68!
+        x_length=7.5,             # เกิน 5.4!
+        y_length=5.5,              # เกิน 4.3!
     )
 
 ✅ CORRECT — คำนวณจาก frame_width / middle_zone_height เสมอ:
     axes = Axes(
         x_range=[0, 10, 1],
-        x_length=frame_width * 0.60,        # = 5.4, ปลอดภัย
-        y_length=middle_zone_height * 0.65, # ปลอดภัยเสมอถ้า middle_zone_height คือ frame_height*0.45
+        x_length=frame_width * 0.60,         # = 5.4, ปลอดภัย
+        y_length=middle_zone_height * 0.60,  # = 4.32 ≈ 4.3, ปลอดภัย
     )
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-กฎ 10: font_size ของ Text()/MathTex() ห้ามเกิน 28
+กฎ 10: font_size — Text() ห้ามเกิน 28, MathTex() ห้ามเกิน 20 (ทุกโซน ไม่มีข้อยกเว้น)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ระบบจะ ERROR ทันทีถ้า font_size ใน Text() หรือ MathTex() เกิน 28 (รวมถึง step titles, สมการยาว, final answer)
+ระบบจะ ERROR ทันทีถ้า font_size ใน Text() เกิน 28 หรือใน MathTex() เกิน 20
+กฎนี้ใช้เหมือนกันทุกโซน (Top/Middle/Bottom) — ไม่มีข้อยกเว้นสำหรับ Title หรือ
+ตำแหน่งใดๆ ทั้งสิ้น ดูตาราง 5F สำหรับค่าที่แนะนำในแต่ละตำแหน่ง
 
 ❌ WRONG:
     title = Text('ขั้นตอนที่ 1', font='TH Sarabun New', font_size=32, color=BLUE_C)
     eq = MathTex(r'\Delta\phi = 2\pi|f_2-f_1|t', font_size=34, color=GREEN_C)
 
-✅ CORRECT — ใช้ 26-28 เสมอ ไม่ว่าข้อความจะยาวแค่ไหน:
+✅ CORRECT:
     title = Text('ขั้นตอนที่ 1', font='TH Sarabun New', font_size=26, color=BLUE_C)
-    eq = MathTex(r'\Delta\phi = 2\pi|f_2-f_1|t', font_size=26, color=GREEN_C)
+    eq = MathTex(r'\Delta\phi = 2\pi|f_2-f_1|t', font_size=20, color=GREEN_C)
 
 หากสมการยาวเกินไปจน scale_to_fit_width() บีบให้เล็กเกินอ่านไม่ออก
 ให้ตัดสมการเป็นหลายบรรทัดด้วย VGroup(...).arrange(DOWN, ...) แทนการเพิ่ม font_size
@@ -247,12 +272,13 @@ LESSON_SUMMARY_SYSTEM_INSTRUCTION = _MANIM_CODE_RULES + r"""
 3. โครงสร้าง Episodes — ครบทุกข้อ ไม่ข้าม
 ══════════════════════════════════════════════════
 ทุก episode ต้องมี script + manim_code_lines + voiceover_script ครบ (ดูข้อ 10)
-ความยาวของแต่ละ episode ห้ามต่ำกว่า 30 วินาที (ดูข้อ 10.1)
+ความยาวของแต่ละ episode ต้องไม่ต่ำกว่า 60 วินาที (ดูข้อ 10.1) — นี่คือตัวเลขเดียว
+ที่ใช้ทั้งระบบ ตรงกับ estimated_duration_seconds ≥ 60 ใน Checklist ข้อ 20
 
 ══════════════════════════════════════════════════
 4. source_problem_summary + สคริปต์ TTS
 ══════════════════════════════════════════════════
-สรุปโจทย์ทุกข้อ หรือ null ถ้าทฤษฎีล้วน
+สรุปโจทย์ทุกข้อรวมเป็นข้อความเดียว (string เดียว ไม่ใช่ array) หรือ null ถ้าทฤษฎีล้วน
 บทพูดสะกดสัญลักษณ์เป็นคำอ่านภาษาไทย
 
 ก่อนเขียนโค้ดใดๆ ให้สกัดค่าตัวเลขจริงจากโจทย์ออกมาเป็นตัวแปร python ก่อนเสมอ
@@ -354,8 +380,8 @@ problem_text.move_to(top_center)
 [OVERFLOW BUG #1 — Axes ขนาดใหญ่เกินไป]
 
 บังคับใช้ขนาด Axes ต่อไปนี้เท่านั้น:
-- x_length = frame_width * 0.60
-- y_length = middle_zone_height * 0.65
+- x_length = frame_width * 0.60  (= 5.4)
+- y_length = middle_zone_height * 0.60  (≈ 4.3)
 
 [OVERFLOW BUG #2 — include_numbers ใน axis_config]
 
@@ -365,7 +391,7 @@ axes = Axes(
     x_range=[0, x_max, x_step],
     y_range=[y_min, y_max, y_step],
     x_length=frame_width * 0.60,
-    y_length=middle_zone_height * 0.65,
+    y_length=middle_zone_height * 0.60,
     axis_config={
         'color': GRAY_C,
         'stroke_width': 2,
@@ -410,7 +436,7 @@ axes_group.move_to(middle_center)
 [OVERFLOW BUG #5 — สมการในโซนล่างใหญ่เกิน]
 
 Font size บังคับ:
-- MathTex สมการ: font_size=26 เท่านั้น
+- MathTex สมการ: font_size=20 เท่านั้น
 - Text หัวข้อขั้นตอน: font_size=26 เท่านั้น
 
 Double-clamp บังคับ:
@@ -437,11 +463,11 @@ bottom_center = np.array([0, bottom_zone_center_y, 0])
 
 [LONG_MATHTEX] สมการยาวเกิน 40 ตัวอักษรต้องแยกเป็น VGroup ของ MathTex หลายบรรทัด
 ❌ WRONG:
-   eq = MathTex(r'F = ma = m \cdot \frac{dv}{dt} = ... (ยาวเกิน 40)', font_size=26)
+   eq = MathTex(r'F = ma = m \cdot \frac{dv}{dt} = ... (ยาวเกิน 40)', font_size=20)
 ✅ CORRECT:
    eq_lines = VGroup(
-       MathTex(r'F = ma = m \cdot \frac{dv}{dt}', font_size=26),
-       MathTex(r'\quad = m \cdot 2.0 \, \mathrm{N}', font_size=26),
+       MathTex(r'F = ma = m \cdot \frac{dv}{dt}', font_size=20),
+       MathTex(r'\quad = m \cdot 2.0 \, \mathrm{N}', font_size=20),
    ).arrange(DOWN, aligned_edge=LEFT, buff=0.15)
    eq_lines.scale_to_fit_width(frame_width * 0.88)
 
@@ -488,19 +514,21 @@ Zone assignment:
 - Bottom (35%): Equations + Steps → bottom_center
 
 ══════════════════════════════════════════════════
-5F. ตารางสรุป font_size บังคับ (HARD LIMITS)
+5F. ตารางสรุป font_size บังคับ (HARD LIMITS — ค่าเดียวกันทุกโซน ไม่มีข้อยกเว้น)
 ══════════════════════════════════════════════════
 
 | ตำแหน่ง | Text() | MathTex() |
 |---|---|---|
-| Title โจทย์ (Top) | 28 | 28 |
-| หัวข้อขั้นตอน (Bottom) | 26 | 26 |
+| Title โจทย์ (Top) | 28 | 20 |
+| หัวข้อขั้นตอน (Bottom) | 26 | 20 |
 | สมการ (Bottom) | — | 20 |
 | Label บนกราฟ | 18 | 18 |
 | ตัวเลขแกน (tick) | 16 | 16 |
 
-ห้ามใช้ font_size ใน Text() เกิน 28 และห้ามใช้ font_size ใน MathTex() เกิน 20 โดยเด็ดขาด 
-(ขนาด 20 เหมาะสมที่สุดสำหรับการแสดงสมการหลายบรรทัดในโซนล่างโดยไม่ต้องแยกบรรทัด)
+ห้ามใช้ font_size ใน Text() เกิน 28 และห้ามใช้ font_size ใน MathTex() เกิน 20 โดยเด็ดขาด
+ในทุกตำแหน่งบนจอ ไม่มีข้อยกเว้นแม้แต่ Title zone (ขนาด 20 เหมาะสมที่สุดสำหรับการ
+แสดงสมการหลายบรรทัดในโซนล่างโดยไม่ต้องแยกบรรทัด และตรงกับค่าที่ code_validator.py
+บังคับ clamp จริงในทุกกรณี)
 
 ══════════════════════════════════════════════════
 6. JSON-SAFE STRING ENCODING
@@ -527,7 +555,7 @@ Zone assignment:
 {
   "is_physics": boolean,
   "message": "string",
-  "source_problem_summary": ["string"] | null,
+  "source_problem_summary": "string" | null,
   "content_type": "concept" | "problem" | "mixed",
   "total_episodes": number,
   "episodes": [
@@ -613,9 +641,9 @@ Zone assignment:
 □ 2. bottom_center ใช้ bottom_zone_center_y
 □ 3. ทุก .move_to() ใช้ numpy array หรือ top/middle/bottom_center
 □ 4. ทุก Episode มี visualization ในโซนกลาง "ตลอดทั้ง Episode"
-□ 5. axes x_length ≤ frame_width * 0.65, y_length ≤ middle_zone_height * 0.65
+□ 5. axes x_length ≤ 5.4 (frame_width * 0.60), y_length ≤ 4.3 (middle_zone_height * 0.60)
 □ 6. ไม่มี include_numbers ใน axis_config
-□ 7. font_size: Title=28, สมการ/หัวข้อ=26, label แกน≤18, tick≤16
+□ 7. font_size: Title Text=28 / Title MathTex=20, หัวข้อ Text=26, สมการ MathTex=20, label แกน≤18, tick≤16
 □ 8. axes_group double-clamp + move_to(middle_center) เป็นขั้นตอนสุดท้าย
 □ 9. step_group double-clamp + move_to(bottom_center)
 □ 10. ไม่มี LaTeX \( \) หรือ \[ \] ใน Text()
@@ -634,12 +662,16 @@ Zone assignment:
 10. การซิงค์เสียงพากย์กับวิดีโอ (Voiceover Script Sync)
 ══════════════════════════════════════════════════
 
-[10.1] ความยาววิดีโอต้องไม่ต่ำกว่า 60 วินาที
+[10.1] ความยาววิดีโอต้องไม่ต่ำกว่า 60 วินาที (ค่าเดียวกับ estimated_duration_seconds
+ในข้อ 20 ของ Checklist และข้อ 3 — ใช้ตัวเลขนี้ตัวเดียวทั้งระบบ)
 
-สูตรคำนวณความยาว segment:
+สูตรคำนวณความยาว segment (ใช้ภายในเพื่อกำหนด start_time_seconds/end_time_seconds
+ของแต่ละ segment เท่านั้น — segment_duration_seconds ไม่ใช่ key ที่ต้องใส่ใน JSON
+output ดูโครงสร้าง JSON จริงในข้อ 7):
     segment_duration_seconds = max(2.5, จำนวนตัวอักษรไทย / 12)
 
-ผลรวมทุก segment ต้องไม่ต่ำกว่า 30 วินาที
+ผลรวมของ segment_duration_seconds ทุกตัวในเอพิโสด (เท่ากับ
+end_time_seconds ของ segment สุดท้าย) ต้องไม่ต่ำกว่า 60 วินาที
 
 [10.2] ลำดับโครงสร้างบทพูด-ภาพ:
 1. hook_problem: Title + Problem ปรากฏใน Top zone

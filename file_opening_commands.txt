@@ -4,3 +4,12 @@ start venv: .\.venv\Scripts\Activate.ps1
 python -m app.scripts.test_manim_render
 $env:Path += ";C:\Users\put tiwutanon\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin"
 gcloud --version
+
+docker build -t pagespark-api ./server
+docker tag pagespark-api asia-southeast1-docker.pkg.dev/pagespark-503016/pagespark-api/pagespark-api:latest
+docker push asia-southeast1-docker.pkg.dev/pagespark-503016/pagespark-api/pagespark-api:latest
+gcloud run deploy pagespark-api `
+  --image=asia-southeast1-docker.pkg.dev/pagespark-503016/pagespark-api/pagespark-api:latest `
+  --region=asia-southeast1 `
+  --timeout=3600 `
+  --max-instances=1
