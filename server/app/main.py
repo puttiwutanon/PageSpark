@@ -248,6 +248,117 @@ def _try_parse_lesson_json(raw_json: str) -> tuple[dict | None, list[str]]:
     return None, parse_errors
 
 
+def _try_parse_quiz_json(raw_json: str) -> tuple[dict | None, list[str]]:
+    """Same multi-strategy parsing as _try_parse_lesson_json, reused for quiz JSON."""
+    return _try_parse_lesson_json(raw_json)
+
+
+def _generate_quiz_from_content(
+    gemini_file,
+    lesson_json: dict,
+    question_titles: list[str],
+    num_questions: int = 10,
+) -> Optional[list[dict]]:
+    """
+    Generate a review quiz based directly on the problems in the uploaded
+    image — same underlying concepts, but with reworded question text and
+    changed numbers/values so it isn't a verbatim copy of the source problems.
+
+    This is intentionally lightweight (single Gemini call, small JSON payload,
+    no Manim/render involvement) so it can run right after lesson-JSON
+    generation without inheriting the fragility of the render pipeline. If it
+    fails for any reason, it returns None and the caller continues normally —
+    a missing quiz should never fail video generation.
+    """
+    topics_hint = ", ".join(question_titles) if question_titles else "เนื้อหาในภาพที่อัปโหลด"
+
+    quiz_instruction = f"""
+คุณจะได้รับภาพโจทย์ฟิสิกส์ที่ผู้ใช้ถ่าย/อัปโหลดมา (หัวข้อโดยประมาณ: {topics_hint})
+
+หน้าที่ของคุณ: สร้างแบบทดสอบทบทวน (quiz) จำนวน {num_questions} ข้อ โดยอิงจากโจทย์และแนวคิดที่ปรากฏ
+ในภาพนี้โดยตรง แต่ห้ามคัดลอกโจทย์เดิมคำต่อคำ ให้ทำดังนี้กับแต่ละข้อ:
+  • เปลี่ยนถ้อยคำ/บริบทของโจทย์ให้แตกต่างจากต้นฉบับ (เช่น เปลี่ยนชื่อวัตถุ, สถานการณ์)
+  • เปลี่ยนตัวเลข/ค่าตัวแปรให้ต่างจากต้นฉบับ (คำตอบจึงต้องคำนวณใหม่ให้ถูกต้องตามตัวเลขใหม่)
+  • ยังคงทดสอบแนวคิดฟิสิกส์เดียวกันกับโจทย์ต้นฉบับ (เพื่อให้ตรงกับสิ่งที่ผู้ใช้กำลังเรียน)
+  • ถ้าโจทย์ต้นฉบับมีน้อยกว่า {num_questions} ข้อ ให้สร้างข้อเพิ่มเติมที่เป็นแนวคิดใกล้เคียง/ต่อยอด
+    จากเนื้อหาเดียวกัน เพื่อให้ครบ {num_questions} ข้อ
+
+รูปแบบคำตอบ: ส่งคืน JSON เท่านั้น ห้ามมีข้อความอื่นนอก JSON ห้ามใส่ ```markdown fences
+{{
+  "quizzes": [
+    {{
+      "question": "...",
+      "options": ["...", "...", "...", "..."],
+      "correct_answer": "...",
+      "step_by_step_solution": "..."
+    }}
+  ]
+}}
+ต้องมีสมาชิกใน "quizzes" ทั้งหมดเท่ากับ {num_questions} ข้อพอดี
+correct_answer ต้องเป็นข้อความที่ตรงกับหนึ่งใน options เป๊ะๆ (string เดียวกันทุกตัวอักษร)
+"""
+
+    for attempt_questions in ([num_questions, max(5, num_questions // 2)] if num_questions > 5 else [num_questions]):
+        try:
+            prompt = quiz_instruction if attempt_questions == num_questions else quiz_instruction.replace(
+                str(num_questions), str(attempt_questions)
+            )
+            response = client.models.generate_content(
+                model='gemini-3.5-flash',
+                contents=[gemini_file, prompt],
+                config=types.GenerateContentConfig(
+                    temperature=0.5,
+                    response_mime_type="application/json",
+                    max_output_tokens=8192,
+                ),
+            )
+
+            if _is_finish_reason_truncated(response):
+                logger.warning(
+                    f"⚠️ Quiz generation response was TRUNCATED at {attempt_questions} questions, "
+                    f"will retry smaller if possible"
+                )
+                continue
+
+            raw = (response.text or "").strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+
+            quiz_data, quiz_parse_errors = _try_parse_quiz_json(raw)
+            if quiz_data is None:
+                logger.warning(f"⚠️ Quiz JSON parse failed: {quiz_parse_errors}")
+                continue
+
+            quizzes = quiz_data.get("quizzes", [])
+            # Basic shape validation — drop malformed items rather than fail entirely
+            clean_quizzes = []
+            for q in quizzes:
+                if (
+                    isinstance(q, dict)
+                    and q.get("question")
+                    and isinstance(q.get("options"), list)
+                    and len(q.get("options")) >= 2
+                    and q.get("correct_answer") in q.get("options", [])
+                    and q.get("step_by_step_solution")
+                ):
+                    clean_quizzes.append(q)
+                else:
+                    logger.warning(f"⚠️ Dropping malformed quiz item: {q}")
+
+            if clean_quizzes:
+                logger.info(f"✅ Quiz generated: {len(clean_quizzes)}/{attempt_questions} valid questions")
+                return clean_quizzes
+
+            logger.warning("⚠️ Quiz generation produced zero valid questions, retrying smaller if possible")
+
+        except Exception as e:
+            logger.warning(f"⚠️ Quiz generation attempt failed ({attempt_questions} questions): {e}")
+            continue
+
+    logger.warning("⚠️ Quiz generation failed after all attempts — continuing without a quiz")
+    return None
+
+
 @app.post("/api/generate-video")
 async def generate_video(
     file: UploadFile = File(...),
@@ -394,6 +505,31 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
                        "Please retry, or try photographing one question at a time.)"
             )
 
+        # ── Step 2.5: Generate review quiz from the same uploaded content ────
+        # Runs right after lesson-JSON generation (ingest + summarize), NOT
+        # after rendering — rendering is the slow/fragile step and the quiz
+        # must not depend on it succeeding. Reuses the already-uploaded
+        # gemini_file, so this costs one extra Gemini call, nothing else.
+        logger.info("🧩 Step 2.5: Generating 10-question review quiz from uploaded content...")
+        quiz_questions = None
+        try:
+            quiz_questions = _generate_quiz_from_content(
+                gemini_file=gemini_file,
+                lesson_json=lesson_json,
+                question_titles=question_titles,
+                num_questions=10,
+            )
+            if quiz_questions:
+                logger.info(f"✅ Quiz ready: {len(quiz_questions)} questions")
+            else:
+                logger.warning("⚠️ No quiz produced — video generation will continue without one")
+        except Exception as e:
+            # Belt-and-suspenders: _generate_quiz_from_content already catches
+            # its own errors, but this endpoint must NEVER fail because of the
+            # quiz step, so guard it again here.
+            logger.warning(f"⚠️ Step 2.5 (quiz) raised unexpectedly, continuing without quiz: {e}")
+            quiz_questions = None
+
         # ── Step 3: Enforce episode count ────────────────────────────────────
         logger.info(f"📊 Step 3: Enforcing episode count (expected={expected_count})...")
         lesson_json = engine.enforce_episode_count(
@@ -439,6 +575,9 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
             "question_titles": question_titles,
             "lesson_json": lesson_json,
             "render_results": render_results,
+            "quiz": quiz_questions,                    # list[dict] | None
+            "quiz_available": bool(quiz_questions),
+            "quiz_question_count": len(quiz_questions) if quiz_questions else 0,
         }
 
     except HTTPException:
