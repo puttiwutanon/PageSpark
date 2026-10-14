@@ -10,6 +10,9 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 from app.services.code_validator import preprocess_code
+from app.core.episode_schema import EpisodeData
+from app.services.scene_compiler import compile_scene, BOILERPLATE_HEADER, IND
+from app.services.episode_sanitizer import sanitize_episode_dict, normalize_diagram_lines
 from app.services.audio_engine import AudioEngine
 from app.services.video_engine import VideoEngine
 from app.storage.cloudinary_storage import upload_episode_video
@@ -24,6 +27,40 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 1
+
+# The diagram fragment is validated INSIDE the boilerplate header (so the
+# validator sees frame_width / middle_center / np defined, exactly like the old
+# full-scene pipeline did) and delimited by markers so it can be cut back out.
+_FRAG_START = IND + "# <<<DIAGRAM_START>>>"
+_FRAG_END = IND + "# <<<DIAGRAM_END>>>"
+
+
+def _wrap_fragment(fragment: list[str]) -> str:
+    body = fragment if any(l.strip() for l in fragment) else [IND + "pass"]
+    return "\n".join(BOILERPLATE_HEADER + [_FRAG_START] + body + [_FRAG_END])
+
+
+def _fragment_bounds(lines: list[str]) -> tuple[int | None, int | None]:
+    s = next((i for i, l in enumerate(lines) if "<<<DIAGRAM_START>>>" in l), None)
+    e = next((i for i, l in enumerate(lines) if "<<<DIAGRAM_END>>>" in l), None)
+    return s, e
+
+
+def _extract_fragment(code: str) -> list[str] | None:
+    """Cut the diagram fragment back out of a wrapped scene. If a Gemini
+    full-rewrite dropped the markers, fall back to everything after the zone
+    boilerplate (the last boilerplate line is `bottom_center = ...`)."""
+    lines = code.splitlines()
+    s, e = _fragment_bounds(lines)
+    if s is None:
+        idx = [i for i, l in enumerate(lines) if l.strip().startswith("bottom_center = np.array")]
+        if not idx:
+            return None
+        s = idx[-1]
+    if e is None or e <= s:
+        e = len(lines)
+    frag = lines[s + 1:e]
+    return [l for l in frag if "<<<DIAGRAM_" not in l]
 
 
 def _quality_check(self, code_lines: list[str]) -> tuple[bool, list[str]]:
@@ -547,178 +584,122 @@ class Manim_Engine:
             episodes.append({
                 "episode_number": i,
                 "title": title,
+                "problem_desc": "",
                 "core_vocabulary": [],
-                "video_plan": {"estimated_duration_seconds": 60},
+                "video_plan": {"estimated_duration_seconds": 60, "visual_cues": "", "audio_cues": ""},
                 "script": {"hook": "", "main_body": "", "example_or_trick": "", "call_to_action": ""},
                 "voiceover_script": [],
-                "manim_code_lines": [
-                    "import numpy as np",
-                    "from manim import *",
-                    "config.pixel_width = 1080",
-                    "config.pixel_height = 1920",
-                    "config.frame_height = 16.0",
-                    "config.frame_width = 9.0",
-                    "config.frame_rate = 60",
-                    "class PhysicsScene(Scene):",
-                    "    def construct(self):",
-                    "        self.camera.background_color = '#1C1C2E'",
-                    f"        title = Text('{title}', font='TH Sarabun New', font_size=28, color=WHITE)",
-                    "        title.move_to(ORIGIN)",
-                    "        self.play(FadeIn(title))",
-                    "        self.wait(3)",
-                ]
+                "diagram_code_lines": [],
+                "steps": [],
             })
         lesson_json["episodes"] = episodes
         lesson_json["total_episodes"] = expected_count
         logger.info(f"✅ Episode count enforced: now {len(episodes)} episodes")
         return lesson_json
 
+    def _validate_and_fix_fragment(self, fragment: list[str], ep_num, allow_gemini: bool = True) -> list[str]:
+        """Run the deterministic auto-fixers + detectors over ONLY the diagram
+        fragment (wrapped in the boilerplate so names resolve), optionally ask
+        Gemini for targeted line fixes, and return the best fragment we have."""
+        for fix_round in range(MAX_RETRIES + 1):
+            val = preprocess_code(_wrap_fragment(fragment))
+            if val.auto_fixes:
+                logger.info(f"  🔧 Ep {ep_num} diagram auto-fixes ({len(val.auto_fixes)}):")
+                for fix in val.auto_fixes:
+                    logger.info(f"    • {fix}")
+
+            fixed_code = val.fixed_code
+            extracted = _extract_fragment(fixed_code)
+            if extracted is not None:
+                fragment = extracted
+
+            # Only violations that point INSIDE the fragment are ours to fix;
+            # BOTTOM_ZONE_EMPTY is meaningless here (the compiler owns that zone).
+            s, e = _fragment_bounds(fixed_code.splitlines())
+            relevant = []
+            for v in val.violations:
+                if v.rule == "BOTTOM_ZONE_EMPTY":
+                    continue
+                if v.rule == "SYNTAX_ERROR" or (s is not None and e is not None and s + 2 <= v.line <= e):
+                    relevant.append(v)
+
+            if not relevant:
+                return fragment
+
+            logger.warning(f"  ⚠️ Ep {ep_num}: {len(relevant)} diagram violation(s) after auto-fix:")
+            for v in relevant:
+                logger.warning(f"    [{v.rule}] line {v.line}: {str(v.snippet)[:60]}")
+
+            if not allow_gemini or fix_round >= MAX_RETRIES:
+                return fragment
+
+            patched = self._ask_gemini_to_fix_lines(code=fixed_code, violations=relevant)
+            new_frag = _extract_fragment(patched) if patched else None
+            if not new_frag:
+                return fragment
+            fragment = normalize_diagram_lines(new_frag)
+        return fragment
+
     async def render_episode(self, episode_data: dict, *, uid: str | None = None, lesson_id: str | None = None) -> dict:
-        """Render a single episode with video + audio combination."""
+        """Render one episode through the TEMPLATE pipeline:
+
+            structured JSON -> sanitize -> EpisodeData -> validate diagram
+            fragment -> compile_scene() -> manim -> audio -> upload
+
+        Attempts 1..MAX_RETRIES+1 render the full scene (the diagram fragment is
+        repaired by Gemini between attempts). The LAST attempt renders without
+        the diagram so a bad diagram can never cost the user the whole video —
+        title + equation steps are compiler-generated and always safe.
+        """
         ep_num = episode_data.get("episode_number", 0)
         logger.info(f"🔄 ===== STARTING RENDER for episode {ep_num} =====")
         logger.info(f"   uid={uid}, lesson_id={lesson_id}")
         logger.info(f"   title={episode_data.get('title', 'Untitled')}")
-        
+
         filename = f"scene_ep_{ep_num}.py"
         current_data = dict(episode_data)
         render_output = "No render attempted yet."
 
-        for attempt in range(1, MAX_RETRIES + 2):
-            logger.info(f"📹 Episode {ep_num} — render attempt {attempt}/{MAX_RETRIES + 1}")
+        # ── Step 0: sanitize + schema-validate ─────────────────────────────
+        try:
+            episode = EpisodeData.model_validate(sanitize_episode_dict(episode_data))
+        except Exception as exc:
+            msg = f"Episode {ep_num} does not match the EpisodeData schema: {exc}"
+            logger.error(f"❌ {msg}")
+            return {"status": "error", "message": msg, "attempts": 0}
 
-            # ── Step 0: Deterministic pre-processor ─────────────────────────
-            raw_code = "\n".join(current_data["manim_code_lines"])
-            val = preprocess_code(raw_code)
+        # ── Step 1: validate/fix ONLY the diagram fragment ─────────────────
+        fragment = list(episode.diagram_code_lines)
+        if any(l.strip() for l in fragment):
+            fragment = self._validate_and_fix_fragment(fragment, ep_num)
+        else:
+            logger.info(f"  ℹ️ Ep {ep_num}: no diagram_code_lines — rendering title + steps only")
 
-            if val.auto_fixes:
-                logger.info(f"  🔧 Auto-fixes ({len(val.auto_fixes)}):")
-                for fix in val.auto_fixes:
-                    logger.info(f"    • {fix}")
+        total_attempts = MAX_RETRIES + 2          # last one = diagram-less fallback
+        attempt = 0
+        for attempt in range(1, total_attempts + 1):
+            degraded = attempt == total_attempts
+            if degraded and not any(l.strip() for l in fragment):
+                break  # nothing to drop — the previous attempt already was diagram-less
+            logger.info(
+                f"📹 Episode {ep_num} — render attempt {attempt}/{total_attempts}"
+                + (" (FALLBACK: no diagram)" if degraded else "")
+            )
 
-            # ── Handle violations ──────────────────────────────────────────────
-            if val.has_violations:
-                logger.warning(
-                    f"  ⚠️ Ep {ep_num} attempt {attempt}: "
-                    f"{len(val.violations)} violations after auto-fix:"
-                )
-                for v in val.violations:
-                    logger.warning(f"    [{v.rule}] line {v.line}: {v.snippet[:60]}")
-
-                if attempt > MAX_RETRIES:
-                    logger.warning(
-                        f"  ⚠️ Ep {ep_num}: Out of retries, attempting render with auto-fixed code..."
-                    )
-                    current_data["manim_code_lines"] = val.fixed_code.splitlines()
-                else:
-                    fixed_code = self._ask_gemini_to_fix_lines(
-                        code=val.fixed_code,
-                        violations=val.violations,
-                    )
-                    if fixed_code is not None:
-                        current_data["manim_code_lines"] = fixed_code.splitlines()
-                        continue
-                    else:
-                        fixed_lines = self._ask_gemini_to_fix(
-                            original_code=val.fixed_code,
-                            error_message="Pre-render validation failed — see violations.",
-                            violation_summary=val.violation_summary(),
-                        )
-                        if fixed_lines is None:
-                            logger.warning(
-                                f"  ⚠️ Ep {ep_num}: Gemini unavailable, attempting render with auto-fixed code."
-                            )
-                            current_data["manim_code_lines"] = val.fixed_code.splitlines()
-                        else:
-                            current_data["manim_code_lines"] = fixed_lines
-                            continue
-            else:
-                current_data["manim_code_lines"] = val.fixed_code.splitlines()
-
-            # ── Quality Check ─────────────────────────────────────────────────
-            is_quality_ok, quality_issues = _quality_check(self, current_data["manim_code_lines"])
-            
-            if not is_quality_ok:
-                logger.warning(f"  ⚠️ Ep {ep_num} quality check failed: {len(quality_issues)} issues")
-                for issue in quality_issues:
-                    logger.warning(f"    • {issue}")
-                
-                if attempt > MAX_RETRIES:
-                    logger.warning(f"  ⚠️ Ep {ep_num}: Out of retries, attempting render despite quality issues...")
-                else:
-                    logger.info(f"  🔧 Attempting to fix quality issues for episode {ep_num}...")
-                    
-                    quality_violations = []
-                    for i, issue in enumerate(quality_issues):
-                        line_num = 1
-                        for line_idx, line in enumerate(current_data["manim_code_lines"]):
-                            if 'scale_to_fit_width' in line and 'Missing scale_to_fit_width' in issue:
-                                line_num = line_idx + 1
-                                break
-                            elif 'font_size=' in issue:
-                                if 'font_size' in line:
-                                    line_num = line_idx + 1
-                                    break
-                            elif 'MathTex' in line and 'Thai' in issue:
-                                line_num = line_idx + 1
-                                break
-                        else:
-                            line_num = len(current_data["manim_code_lines"])
-                        
-                        class QualityViolation:
-                            def __init__(self, line, rule, description):
-                                self.line = line
-                                self.rule = rule
-                                self.description = description
-                                self.snippet = current_data["manim_code_lines"][line-1] if line <= len(current_data["manim_code_lines"]) else ""
-                        
-                        quality_violations.append(QualityViolation(line_num, f"QUALITY_{i}", issue))
-                    
-                    fixed_code = self._ask_gemini_to_fix_lines(
-                        code="\n".join(current_data["manim_code_lines"]),
-                        violations=quality_violations,
-                    )
-                    
-                    if fixed_code is not None:
-                        current_data["manim_code_lines"] = fixed_code.splitlines()
-                        logger.info(f"  ✅ Quality issues sent to Gemini for line fix")
-                        continue
-                    else:
-                        fixed_lines = self._ask_gemini_to_fix(
-                            original_code="\n".join(current_data["manim_code_lines"]),
-                            error_message=f"Quality check failed:\n" + "\n".join(quality_issues),
-                        )
-                        if fixed_lines is not None:
-                            current_data["manim_code_lines"] = fixed_lines
-                            logger.info(f"  ✅ Quality issues sent to Gemini for full fix")
-                            continue
-                        else:
-                            logger.warning(f"  ⚠️ Gemini unavailable for quality fix, attempting render anyway")
-
-            # ── Security check ──────────────────────────────────────────────
+            # ── Step 2: compile (trusted by construction — never re-validated) ──
+            current_data["manim_code_lines"] = compile_scene(episode, [] if degraded else fragment)
             filepath, code_string = self._write_scene_file(current_data, filename)
+
+            # ── Step 3: syntax + security check on the final file ──────────────
             is_safe, safety_msg = self._validate_code(code_string)
-            if not is_safe:
-                logger.error(f"🔒 Security validation failed: {safety_msg}")
+            if is_safe:
+                success, render_output = self._run_manim(filepath)
+            else:
+                logger.error(f"🔒 Validation failed: {safety_msg}")
                 if os.path.exists(filepath):
                     os.remove(filepath)
-                if attempt > MAX_RETRIES:
-                    return {"status": "error",
-                            "message": f"Security validation failed: {safety_msg}",
-                            "attempts": attempt}
-                fixed_lines = self._ask_gemini_to_fix(
-                    original_code=code_string,
-                    error_message=f"Security validation failed: {safety_msg}",
-                )
-                if fixed_lines is None:
-                    return {"status": "error",
-                            "message": f"Security fail + Gemini unavailable: {safety_msg}",
-                            "attempts": attempt}
-                current_data["manim_code_lines"] = fixed_lines
-                continue
+                success, render_output = False, f"Validation failed: {safety_msg}"
 
-            # ── Render ──────────────────────────────────────────────────────
-            success, render_output = self._run_manim(filepath)
             if success:
                 logger.info(f"✅ Episode {ep_num} rendered OK on attempt {attempt}.")
                 mp4_path = self._resolve_rendered_mp4_path(filepath)
@@ -751,60 +732,102 @@ class Manim_Engine:
                     logger.warning(f"⚠️ Audio generation failed, using raw video")
                     upload_video_path = mp4_path
                 
-                # ── Upload to Cloudinary ────────────────────────────────────
+                # ── Upload to Cloudinary ─────────────────────────────────────────
+                # IMPORTANT: a render that finishes locally but never makes it
+                # into Cloudinary/Firestore is NOT a success from the caller's
+                # point of view (nothing shows up in the app/DB). We track the
+                # upload outcome explicitly and let it determine the episode's
+                # final status instead of always reporting "success" the
+                # moment Manim itself didn't crash.
                 upload_doc = None
-                if uid and os.path.exists(upload_video_path):
-                    logger.info(f"📤 Uploading final video to Cloudinary for episode {ep_num}...")
-                    upload_doc = upload_episode_video(
-                        upload_video_path,  # Use the combined video path
-                        uid=uid,
-                        episode_number=ep_num,
-                        lesson_id=lesson_id,
-                        question_title=episode_data.get("question_title"),
-                    )
-                    if upload_doc is None:
-                        logger.warning(f"⚠️ Episode {ep_num}: upload failed")
+                upload_status = "skipped_no_uid"
+                upload_error = None
+
+                if uid:
+                    if os.path.exists(upload_video_path):
+                        logger.info(f"📤 Uploading final video to Cloudinary for episode {ep_num}...")
+                        upload_doc = upload_episode_video(
+                            upload_video_path,  # Use the combined video path
+                            uid=uid,
+                            episode_number=ep_num,
+                            lesson_id=lesson_id,
+                            # BUG FIX: episode JSON uses the key "title", not
+                            # "question_title" (which never exists in the
+                            # schema) — the old code silently uploaded every
+                            # video with this metadata field set to None.
+                            question_title=episode_data.get("title"),
+                        )
+                        if upload_doc is None:
+                            upload_status = "failed"
+                            upload_error = (
+                                f"upload_episode_video() returned None for episode {ep_num} "
+                                f"— see cloudinary_storage logs above for the underlying cause"
+                            )
+                            logger.error(f"❌ Episode {ep_num}: {upload_error}")
+                        else:
+                            upload_status = "uploaded"
+                            logger.info(f"✅ Episode {ep_num} uploaded successfully!")
+                            logger.info(f"   Video URL: {upload_doc.get('video_url')}")
+                            logger.info(f"   Document ID: {upload_doc.get('doc_id')}")
                     else:
-                        logger.info(f"✅ Episode {ep_num} uploaded successfully!")
-                        logger.info(f"   Video URL: {upload_doc.get('video_url')}")
-                        logger.info(f"   Document ID: {upload_doc.get('doc_id')}")
-                elif uid and not os.path.exists(upload_video_path):
-                    logger.warning(f"⚠️ Episode {ep_num}: expected file not found at {upload_video_path}")
-                elif not uid:
+                        upload_status = "failed"
+                        upload_error = (
+                            f"Episode {ep_num}: expected rendered file not found at "
+                            f"{upload_video_path} — nothing was uploaded"
+                        )
+                        logger.error(f"❌ {upload_error}")
+                else:
                     logger.info(f"ℹ️ No uid provided, skipping upload for episode {ep_num}")
 
-                logger.info(f"✅ Episode {ep_num} complete!")
+                # BUG FIX: this used to be unconditionally "success" as long
+                # as Manim rendered locally, even when upload_doc was None or
+                # the video file was missing — meaning the API and the app
+                # would report a clean success while nothing ever reached
+                # Cloudinary/Firestore. Now the episode is only "success" if
+                # either no upload was requested (render-only mode) or the
+                # upload genuinely completed.
+                episode_status = "error" if upload_status == "failed" else "success"
+
+                logger.info(
+                    f"{'✅' if episode_status == 'success' else '❌'} "
+                    f"Episode {ep_num} complete (status={episode_status}, upload={upload_status})"
+                )
                 return {
-                    "status": "success",
+                    "status": episode_status,
+                    "upload_status": upload_status,
+                    "message": upload_error,  # None on success, explains failure otherwise
                     "filepath": filepath,
                     "video_path": upload_video_path,
                     "video_url": upload_doc["video_url"] if upload_doc else None,
                     "audio_result": audio_result if audio_result else None,
                     "output": render_output,
                     "attempts": attempt,
+                    "degraded": degraded,  # True => rendered WITHOUT the diagram
                 }
 
             logger.warning(
                 f"❌ Episode {ep_num} attempt {attempt} render failed:\n"
                 + render_output[:400]
             )
-            if attempt > MAX_RETRIES:
-                break
+            # Gemini only repairs the diagram, and only before the fallback attempt.
+            if not degraded and attempt <= MAX_RETRIES:
+                fixed_lines = self._ask_gemini_to_fix(
+                    original_code=_wrap_fragment(fragment),
+                    error_message=render_output,
+                )
+                new_frag = _extract_fragment("\n".join(fixed_lines)) if fixed_lines else None
+                if new_frag:
+                    fragment = self._validate_and_fix_fragment(
+                        normalize_diagram_lines(new_frag), ep_num, allow_gemini=False
+                    )
+                else:
+                    logger.warning(f"⚠️ Ep {ep_num}: Gemini gave no usable diagram fix.")
 
-            fixed_lines = self._ask_gemini_to_fix(
-                original_code=code_string,
-                error_message=render_output,
-            )
-            if fixed_lines is None:
-                logger.warning(f"⚠️ Ep {ep_num}: Gemini unavailable on render error. Stopping.")
-                break
-            current_data["manim_code_lines"] = fixed_lines
-
-        logger.error(f"❌ Episode {ep_num} failed after {min(attempt, MAX_RETRIES + 1)} attempts")
+        logger.error(f"❌ Episode {ep_num} failed after {attempt} attempts")
         return {
             "status": "error",
             "message": render_output,
-            "attempts": min(attempt, MAX_RETRIES + 1),
+            "attempts": attempt,
         }
 
     async def render_all_episodes(self, lesson_json: dict, *, uid: str | None = None, lesson_id: str | None = None) -> list[dict]:
@@ -818,7 +841,11 @@ class Manim_Engine:
         results = []
         for i, episode in enumerate(episodes, 1):
             logger.info(f"📹 Processing episode {i}/{total}")
-            result = await self.render_episode(episode, uid=uid, lesson_id=lesson_id)
+            try:
+                result = await self.render_episode(episode, uid=uid, lesson_id=lesson_id)
+            except Exception as exc:  # never let one episode abort the batch
+                logger.error(f"❌ Episode {i} crashed: {exc}", exc_info=True)
+                result = {"status": "error", "message": f"{type(exc).__name__}: {exc}", "attempts": 0}
             result["episode_number"] = episode.get("episode_number")
             results.append(result)
             
@@ -827,12 +854,19 @@ class Manim_Engine:
             if status == "success":
                 logger.info(f"   Video URL: {result.get('video_url', 'N/A')}")
             else:
-                logger.warning(f"   Error: {result.get('message', 'Unknown error')[:100]}")
+                logger.warning(f"   Error: {(result.get('message') or 'Unknown error')[:100]}")
         
         success_count = sum(1 for r in results if r.get("status") == "success")
         logger.info(f"🏁 ===== RENDER COMPLETE: {success_count}/{total} episodes successful =====")
-        
+
         return results
+
+    # `render_all_episodes` intentionally still returns the raw per-episode
+    # list — main.py's /api/generate-video endpoint is what turns that list
+    # into a single overall status for the HTTP response, and it needs to
+    # do that the same honest way render_episode itself now does (see the
+    # fix comment above): count real successes instead of assuming success
+    # just because this function returned without raising.
 
     def count_questions_first(self, page_content: str) -> int:
         """Count questions in the page content."""

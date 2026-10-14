@@ -18,6 +18,7 @@ from typing import List, Optional
 from firebase_admin import credentials, firestore, auth
 
 from app.core.prompts import LESSON_SUMMARY_SYSTEM_INSTRUCTION, QUIZ_GENERATION_SYSTEM_INSTRUCTION
+from app.core.episode_schema import LessonResponse
 from app.services.code_validator import validate_episode_count
 from app.api.videos import router as videos_router
 from app.services.manim_engine import smart_json_sanitize, Manim_Engine
@@ -465,6 +466,32 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
                     system_instruction=dynamic_instruction,
                     temperature=0.3,
                     response_mime_type="application/json",
+                    # ── STRUCTURED-OUTPUT PIPELINE (template rewrite) ──────
+                    # Mirrors how /api/generate-quiz already enforces
+                    # QuizResponseSchema. LessonResponse now describes the
+                    # NEW shape (diagram_code_lines + steps) that
+                    # manim_engine.py's compiler expects, instead of the old
+                    # freeform manim_code_lines list.
+                    #
+                    # ⚠️ COUPLED CHANGE — DO NOT DEPLOY THIS LINE ALONE:
+                    # LESSON_SUMMARY_SYSTEM_INSTRUCTION (prompts.py) still
+                    # describes the OLD manim_code_lines format as of this
+                    # edit. Enforcing LessonResponse here while the prompt
+                    # text tells Gemini to produce something else gives it
+                    # contradictory instructions. This line is prep work for
+                    # once prompts.py is rewritten to match EpisodeData —
+                    # ship them together, not this one first.
+                    #
+                    # Also worth a careful test once both sides land:
+                    # LessonResponse nests fairly deep (EpisodeData ->
+                    # EquationStep -> EquationLine, plus VoiceoverSegment
+                    # lists) — the Gemini structured-output feature has
+                    # practical complexity/depth limits, and this hasn't
+                    # been exercised against the real API. If it turns out
+                    # to be too deep, the first thing to try is dropping
+                    # voiceover_script from this schema and generating it
+                    # via a separate, simpler call instead.
+                    response_schema=LessonResponse,
                     max_output_tokens=token_budgets[gen_attempt],
                 )
             )
@@ -564,12 +591,34 @@ total_episodes ต้องเป็น {expected_count} และ episodes arra
                 success_count += 1
                 logger.info(f"      Video URL: {result.get('video_url', 'N/A')}")
             else:
-                logger.info(f"      Error: {result.get('message', 'Unknown')[:100]}")
-        logger.info(f"📊 Total: {success_count}/{len(render_results)} episodes successful")
+                logger.info(f"      Error: {(result.get('message') or 'Unknown')[:100]}")
+        total_episodes_rendered = len(render_results)
+        logger.info(f"📊 Total: {success_count}/{total_episodes_rendered} episodes successful")
         logger.info("=" * 60)
 
+        # ── BUG FIX ────────────────────────────────────────────────────────
+        # This used to unconditionally return "status": "success" as long as
+        # this function reached this line without raising an exception —
+        # regardless of what render_results actually contained. That's why
+        # the app could show a clean "เสร็จสิ้น!" success screen with zero
+        # videos actually in Cloudinary/Firestore: every individual episode
+        # could have status "error" and the top-level response would still
+        # say "success". The overall status now reflects success_count,
+        # which was already being computed right above — it just wasn't
+        # being used for anything.
+        if total_episodes_rendered == 0:
+            overall_status = "error"
+        elif success_count == total_episodes_rendered:
+            overall_status = "success"
+        elif success_count > 0:
+            overall_status = "partial"
+        else:
+            overall_status = "error"
+
         return {
-            "status": "success",
+            "status": overall_status,
+            "episodes_succeeded": success_count,
+            "episodes_total": total_episodes_rendered,
             "filename": file.filename,
             "expected_episodes": expected_count,
             "question_titles": question_titles,

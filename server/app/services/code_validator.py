@@ -4,92 +4,1411 @@ server/app/services/code_validator.py
 Deterministic pre-processor for Gemini-generated Manim code.
 Runs BEFORE the render attempt and BEFORE the Gemini retry loop.
 
-PHILOSOPHY: Fix as much as possible deterministically so Gemini retries
-are only needed for structural rewrites, not trivial pattern fixes.
+v2 (AST/tokenizer-based rewrite): see py's module docstring for the
+core design rationale. Summary of what changed from the regex-based v1 and
+why (each maps to a specific item from friend feedback on the old file):
 
-Two-phase approach:
-  Phase 1 — Auto-fix: patterns we can correct safely without LLM help
-  Phase 2 — Violation report: things that need LLM rewrite
+  - Phase 1a (py): deprecated-API renames now use Python's
+    own tokenizer, so a comment or a Text() string that happens to mention
+    "ShowCreation(" is never corrupted (old: plain str.replace() touched
+    everything, comments and strings included).
+  - Phase 1b (py): numpy-import insertion, .move_to() scalar
+    wrapping, aligned_edge=CENTER, font=, font_size/axes clamping, and
+    axis_config include_numbers removal are now AST-based — e.g. the numpy
+    import fixer now respects module docstrings and `from __future__`
+    imports instead of blindly prepending (old version could produce an
+    actual SyntaxError by inserting before a future import).
+  - Phase 1c (py): MathTex/Tex/Text string CONTENT fixes
+    (backslash over-escaping, missing r-prefix, Thai-in-mathrm, LaTeX-in-
+    Text, quote normalization) now edit the exact raw source span of each
+    string argument located via the AST, rather than matching a regex
+    against the whole file. This is what makes it possible to correctly
+    fix a non-raw string with a dangerous escape sequence at all (working
+    on the AST's decoded .value would already be corrupted by the time we
+    see it), and it naturally handles multi-line and double-quoted strings
+    that the old per-line regexes missed.
+  - Phase 1d (py): VGroup(*[comprehension]) expansion
+    and long-MathTex splitting now compute indentation from the actual
+    AST node position instead of a hardcoded guess — the old version could
+    produce invalid (or just wrong) indentation if the pattern appeared at
+    an unexpected nesting depth.
+  - Undefined-variable detection (py): properly scope-aware using
+    real nested-function resolution, instead of one flat file-wide dict.
+    This fixes a real cross-function false-negative bug AND correctly
+    avoids flagging legitimate closures (the projectile-motion
+    `def trajectory(t): ...` pattern from prompts.py rule 5B-2 reads
+    outer-scope variables, which is normal Python and must not be flagged).
+  - New: explicit syntax-error detection (py), run first and
+    short-circuiting the rest of the pipeline — a malformed file now gets
+    reported as an explicit, actionable SYNTAX_ERROR violation instead of
+    silently skipping downstream checks.
+  - Font-size detectors consolidated: the old file had two detectors with
+    different, contradictory thresholds (>28 and >30) and a comment noting
+    one might be unused. Now one detector matching the fixer's own limits.
 
-NOTE ON APPROACH: most fixers below are still regex/text based rather than
-fully AST/token based. That is a known limitation (a global text
-substitution can in principle touch a comment or an unrelated string) and
-the long-term recommendation is to migrate the highest-risk fixers to
-AST/tokenize-based rewrites and to split this module into
-models.py / syntax.py / autofix.py / detectors.py / validator.py. This
-revision tightens the highest-risk spots (NumPy import insertion,
-indentation-safety of generated blocks, comment/string-safety of the
-`.replace()`-based renames, scope-aware undefined-variable detection,
-explicit syntax-error detection, and a font-size threshold conflict)
-without rewriting every fixer, so it stays a drop-in replacement for the
-existing call sites.
+A critical bug specific to this rewrite (documented in py): Python's
+`ast` module reports column offsets in UTF-8 BYTES, not characters. Since
+virtually every string in this codebase contains Thai text, naively treating
+col_offset as a Python string index silently misaligns every edit on a line
+with Thai text before the target node. Source handles the conversion
+correctly — every fixer above goes through it.
 """
 
-import re
+from __future__ import annotations
 import ast
 import io
-import tokenize
+import tokenize as _tokenize
 import builtins as _builtins_module
+import re
 from dataclasses import dataclass, field
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Shared constants — single source of truth for font-size clamping so the
-# auto-fixer and the detector can never disagree with each other again.
-# ─────────────────────────────────────────────────────────────────────────────
+# ============================================================================
+# CORE
+# ============================================================================
+
+import ast
+import io
+import tokenize as _tokenize
+
+
+def _byte_col_to_char_col(line: str, byte_col: int) -> int:
+    """
+    ast.AST.col_offset / end_col_offset are documented as UTF-8 BYTE offsets
+    into the source line, not character offsets (see the `ast` docs: "the
+    UTF-8 byte offset of the first token"). Since virtually every string in
+    this codebase contains Thai text (3 bytes/char in UTF-8), naively using
+    col_offset as a Python string index silently misaligns every node that
+    comes after Thai text on the same line — this converts correctly.
+    """
+    return len(line.encode("utf-8")[:byte_col].decode("utf-8", errors="ignore"))
+
+
+class Source:
+    """
+    Precomputed position-lookup context for one piece of source code. Build
+    ONE of these per call to a fixer (via `Source(code)`), then use
+    .span(node) / .text(node) instead of bare line-offset math — this is
+    what correctly handles the UTF-8 byte-vs-char column issue above.
+    """
+
+    __slots__ = ("code", "_lines", "_char_offsets")
+
+    def __init__(self, code: str):
+        self.code = code
+        # Lines WITHOUT line endings — ast col_offset never includes the
+        # newline character, so this is what byte-column conversion needs.
+        self._lines = code.splitlines() + ["", ""]  # padded for EOF edge positions
+        offsets = [0]
+        for line in code.splitlines(keepends=True):
+            offsets.append(offsets[-1] + len(line))
+        self._char_offsets = offsets
+
+    def offset(self, lineno: int, byte_col: int) -> int:
+        line = self._lines[lineno - 1] if 0 <= lineno - 1 < len(self._lines) else ""
+        char_col = _byte_col_to_char_col(line, byte_col)
+        base = self._char_offsets[lineno - 1] if 0 <= lineno - 1 < len(self._char_offsets) else len(self.code)
+        return base + char_col
+
+    def span(self, node: ast.AST) -> tuple[int, int]:
+        start = self.offset(node.lineno, node.col_offset)
+        end = self.offset(node.end_lineno, node.end_col_offset)
+        return start, end
+
+    def text(self, node: ast.AST) -> str:
+        start, end = self.span(node)
+        return self.code[start:end]
+
+
+def apply_edits(code: str, edits: list[tuple[int, int, str]]) -> str:
+    """edits: list of (start_offset, end_offset, replacement). Later-position
+    edits are applied first so earlier offsets stay valid."""
+    if not edits:
+        return code
+    # Reject overlapping edits defensively (keep the first one seen at a
+    # given start, drop any edit whose span overlaps an already-kept one) —
+    # this can legitimately happen if two independent fixers both decide to
+    # touch the same node; better to skip one than corrupt the source.
+    deduped: list[tuple[int, int, str]] = []
+    for e in sorted(edits, key=lambda e: e[0]):
+        if deduped and e[0] < deduped[-1][1]:
+            continue  # overlaps previous edit — skip, keep the earlier one
+        deduped.append(e)
+    result = code
+    for start, end, repl in sorted(deduped, key=lambda e: e[0], reverse=True):
+        result = result[:start] + repl + result[end:]
+    return result
+
+
+def safe_parse(code: str) -> ast.Module | None:
+    """Returns None instead of raising on any SyntaxError/ValueError, so
+    AST-based fixers can be skipped cleanly on malformed code instead of
+    crashing the whole pipeline."""
+    try:
+        return ast.parse(code)
+    except (SyntaxError, ValueError):
+        return None
+
+
+def replace_bare_names(
+    code: str,
+    name_map: dict[str, str],
+    *,
+    require_call: bool = False,
+    require_attribute: bool = False,
+    fixes: list[str] | None = None,
+    fix_label: str = "AUTO-FIX",
+) -> str:
+    """
+    Token-level find/replace of NAME tokens. Skips anything inside a STRING
+    or COMMENT token automatically (tokenize separates those out), so this
+    never corrupts a comment or a Text()/Manim string literal that happens
+    to mention the same identifier — unlike a plain str.replace() or a
+    regex over the raw source.
+
+    require_call: only replace when the NAME is immediately followed by '('
+        (i.e. it's being called — used for ShowCreation(, TexMobject(, ...).
+    require_attribute: only replace when the NAME is immediately preceded
+        by '.' (i.e. it's an attribute access — used for .get_graph()).
+
+    Falls back to returning the code unchanged if tokenizing fails (e.g. the
+    code has a real syntax error); downstream syntax-error detection handles
+    that case instead.
+    """
+    if fixes is None:
+        fixes = []
+    try:
+        tokens = list(_tokenize.generate_tokens(io.StringIO(code).readline))
+    except (_tokenize.TokenizeError, IndentationError, SyntaxError, ValueError):
+        return code
+
+    lines = code.splitlines(keepends=True)
+    # tokenize can report positions on a virtual line one past the last real
+    # line (e.g. ENDMARKER after a file with no trailing newline) — pad so
+    # row lookups never go out of range.
+    lines = lines + ["", ""]
+
+    def text_between(start: tuple[int, int], end: tuple[int, int]) -> str:
+        if start[0] == end[0]:
+            return lines[start[0] - 1][start[1]:end[1]]
+        parts = [lines[start[0] - 1][start[1]:]]
+        for row in range(start[0] + 1, end[0]):
+            parts.append(lines[row - 1])
+        parts.append(lines[end[0] - 1][:end[1]])
+        return "".join(parts)
+
+    out: list[str] = []
+    last_end = (1, 0)
+    n = len(tokens)
+
+    for i, tok in enumerate(tokens):
+        tok_type, tok_string, start, end, _line = tok
+        out.append(text_between(last_end, start))
+
+        matched = tok_type == _tokenize.NAME and tok_string in name_map
+        if matched and require_call:
+            nxt = tokens[i + 1] if i + 1 < n else None
+            matched = bool(nxt and nxt.type == _tokenize.OP and nxt.string == "(")
+        if matched and require_attribute:
+            prev = tokens[i - 1] if i > 0 else None
+            matched = bool(prev and prev.type == _tokenize.OP and prev.string == ".")
+
+        if matched:
+            replacement = name_map[tok_string]
+            if replacement != tok_string:
+                fixes.append(f"{fix_label}: {tok_string} \u2192 {replacement}")
+            out.append(replacement)
+        else:
+            out.append(tok_string)
+        last_end = end
+
+    # Trailing text after the final token (rare, e.g. trailing whitespace
+    # with no final NEWLINE) — tokens always end with ENDMARKER whose start
+    # covers this, so this is normally a no-op.
+    return "".join(out)
+
+
+def split_string_prefix_and_quote(raw: str) -> tuple[str, str, str, str]:
+    """
+    raw is the exact source text of a string literal, e.g. "r'\\theta'" or
+    'f"hello"' or "'''multi\\nline'''". Returns (prefix, quote, content,
+    quote) where content is the text strictly between the quote characters,
+    unmodified. Raises ValueError if raw doesn't look like a string literal.
+    """
+    i = 0
+    while i < len(raw) and raw[i].isalpha():
+        i += 1
+    prefix = raw[:i]
+    rest = raw[i:]
+    for q in ("'''", '"""', "'", '"'):
+        if rest.startswith(q) and rest.endswith(q) and len(rest) >= 2 * len(q):
+            content = rest[len(q):-len(q)]
+            return prefix, q, content, q
+    raise ValueError(f"not a recognizable string literal: {raw!r}")
+
+
+def find_calls(tree: ast.AST, names: set[str]) -> list[ast.Call]:
+    """All ast.Call nodes anywhere in tree whose function is a bare Name
+    (not an attribute access) in `names`, e.g. MathTex(...), Text(...)."""
+    return [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in names
+    ]
+
+
+def get_keyword(call: ast.Call, name: str) -> ast.keyword | None:
+    for kw in call.keywords:
+        if kw.arg == name:
+            return kw
+    return None
+
+
+# ============================================================================
+# SCOPE
+# ============================================================================
+
+import ast
+import builtins as _builtins_module
+import re
+
+
+_KNOWN_GLOBALS = {
+    "self", "cls", "config", "np",
+    "smooth", "linear", "there_and_back", "there_and_back_with_pause",
+    "running_start", "not_quite_there", "wiggle", "squish_rate_func",
+    "lingering", "exponential_decay", "double_smooth", "rush_into",
+    "rush_from", "slow_into", "always_redraw", "always_shift",
+    "always_rotate", "always_scale", "turn_animation_into_updater",
+    "interpolate", "rate_functions",
+}
+_NAME_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*$")
+_COMP_TYPES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+class _Scope:
+    __slots__ = ("names", "kind", "parent")
+
+    def __init__(self, kind: str, parent: "_Scope | None" = None):
+        self.names: dict[str, int] = {}
+        self.kind = kind  # 'module' | 'function' | 'comprehension' | 'class'
+        self.parent = parent
+
+    def define(self, name: str, lineno: int) -> None:
+        if name not in self.names or lineno < self.names[name]:
+            self.names[name] = lineno
+
+    def resolve(self) -> "_Scope | None":
+        """Find the nearest ancestor (including self) with this name bound,
+        skipping class scopes when walking outward (real Python behavior:
+        a function nested in a class body doesn't see the class's own
+        attributes as bare names)."""
+        return None  # replaced per-call below; see resolve_name()
+
+    def resolve_name(self, name: str) -> "_Scope | None":
+        scope = self
+        first = True
+        while scope is not None:
+            if (first or scope.kind != "class") and name in scope.names:
+                return scope
+            scope = scope.parent
+            first = False
+        return None
+
+
+class _BindingCollector(ast.NodeVisitor):
+    """Populates scope.names with every name bound DIRECTLY in this scope's
+    statements — does not descend into nested function/lambda/comprehension
+    bodies (those get their own child _Scope, collected separately when the
+    checker recurses into them)."""
+
+    def __init__(self, scope: _Scope):
+        self.scope = scope
+
+    def _targets(self, target: ast.AST, lineno: int) -> None:
+        for n in ast.walk(target):
+            if isinstance(n, ast.Name):
+                self.scope.define(n.id, lineno)
+
+    def visit_FunctionDef(self, node):
+        self.scope.define(node.name, node.lineno)  # name bound in enclosing scope
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node):
+        self.scope.define(node.name, node.lineno)
+
+    def visit_Lambda(self, node):
+        pass  # lambda body is its own scope; nothing leaks out
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            self.scope.define(alias.asname or alias.name.split(".")[0], node.lineno)
+
+    def visit_ImportFrom(self, node):
+        for alias in node.names:
+            if alias.name != "*":
+                self.scope.define(alias.asname or alias.name, node.lineno)
+
+    def visit_Assign(self, node):
+        for t in node.targets:
+            self._targets(t, node.lineno)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node):
+        self._targets(node.target, node.lineno)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node):
+        if node.target is not None:
+            self._targets(node.target, node.lineno)
+        self.generic_visit(node)
+
+    def visit_For(self, node):
+        self._targets(node.target, node.lineno)
+        self.generic_visit(node)
+
+    visit_AsyncFor = visit_For
+
+    def visit_With(self, node):
+        for item in node.items:
+            if item.optional_vars is not None:
+                self._targets(item.optional_vars, node.lineno)
+        self.generic_visit(node)
+
+    visit_AsyncWith = visit_With
+
+    def visit_NamedExpr(self, node):  # walrus operator `x := ...`
+        if isinstance(node.target, ast.Name):
+            self.scope.define(node.target.id, node.lineno)
+        self.generic_visit(node)
+
+    def _skip_comprehension(self, node):
+        pass  # own scope, collected separately
+
+    visit_ListComp = _skip_comprehension
+    visit_SetComp = _skip_comprehension
+    visit_DictComp = _skip_comprehension
+    visit_GeneratorExp = _skip_comprehension
+
+
+def _collect(stmts_or_node, scope: _Scope) -> None:
+    collector = _BindingCollector(scope)
+    if isinstance(stmts_or_node, list):
+        for s in stmts_or_node:
+            collector.visit(s)
+    else:
+        collector.visit(stmts_or_node)
+
+
+def find_undefined_variables(code: str) -> list[tuple[int, str, str]]:
+    """
+    Returns a list of (lineno, name, description) for every name that's
+    either never bound anywhere visible from where it's used, or used
+    before its first assignment within the SAME immediate scope (ordering
+    is only checked within one scope — a nested function using a name the
+    enclosing scope defines later-in-the-function-but-before-the-call is a
+    normal, valid Python closure and is never flagged).
+    """
+    tree = safe_parse(code)
+    if tree is None:
+        return []
+
+    src = Source(code)
+    whitelist = set(dir(_builtins_module)) | _KNOWN_GLOBALS
+    violations: list[tuple[int, str, str]] = []
+    reported: set[str] = set()
+
+    module_scope = _Scope("module")
+    _collect(tree.body, module_scope)
+
+    def check_scope(body, scope: _Scope) -> None:
+        """Check every Load-context Name directly in `body` (a list of
+        statements or a single expression), recursing into nested scopes
+        with fresh _Scope objects as they're encountered."""
+
+        class _Checker(ast.NodeVisitor):
+            def visit_Name(self, node: ast.Name):
+                if not isinstance(node.ctx, ast.Load):
+                    return
+                name = node.id
+                if name in whitelist or not _NAME_PATTERN.match(name):
+                    return
+                owner = scope.resolve_name(name)
+                if owner is None:
+                    if name not in reported:
+                        violations.append((
+                            node.lineno, name,
+                            f"\u0e15\u0e31\u0e27\u0e41\u0e1b\u0e23 '{name}' "
+                            "\u0e16\u0e39\u0e01\u0e43\u0e0a\u0e49\u0e07\u0e32\u0e19\u0e41\u0e15\u0e48\u0e44\u0e21\u0e48\u0e40\u0e04\u0e22\u0e16\u0e39\u0e01\u0e01\u0e33\u0e2b\u0e19\u0e14\u0e04\u0e48\u0e32\u0e17\u0e35\u0e48\u0e44\u0e2b\u0e19\u0e40\u0e25\u0e22\u0e43\u0e19\u0e42\u0e04\u0e49\u0e14 "
+                            "(\u0e2d\u0e32\u0e08\u0e16\u0e39\u0e01\u0e25\u0e1a\u0e17\u0e34\u0e49\u0e07\u0e42\u0e14\u0e22\u0e44\u0e21\u0e48\u0e44\u0e14\u0e49\u0e15\u0e31\u0e49\u0e07\u0e43\u0e08\u0e23\u0e30\u0e2b\u0e27\u0e48\u0e32\u0e07\u0e01\u0e32\u0e23\u0e41\u0e01\u0e49\u0e1a\u0e31\u0e01\u0e2d\u0e31\u0e15\u0e42\u0e19\u0e21\u0e31\u0e15\u0e34) "
+                            "\u0e08\u0e30\u0e17\u0e33\u0e43\u0e2b\u0e49\u0e40\u0e01\u0e34\u0e14 NameError \u0e15\u0e2d\u0e19\u0e40\u0e23\u0e19\u0e40\u0e14\u0e2d\u0e23\u0e4c",
+                        ))
+                        reported.add(name)
+                elif owner is scope and scope.kind != "module_ordering_exempt":
+                    first_def = scope.names[name]
+                    if first_def > node.lineno and name not in reported:
+                        violations.append((
+                            node.lineno, name,
+                            f"\u0e15\u0e31\u0e27\u0e41\u0e1b\u0e23 '{name}' \u0e16\u0e39\u0e01\u0e43\u0e0a\u0e49\u0e07\u0e32\u0e19\u0e17\u0e35\u0e48\u0e1a\u0e23\u0e23\u0e17\u0e31\u0e14 "
+                            f"{node.lineno} \u0e01\u0e48\u0e2d\u0e19\u0e17\u0e35\u0e48\u0e08\u0e30\u0e16\u0e39\u0e01\u0e01\u0e33\u0e2b\u0e19\u0e14\u0e04\u0e48\u0e32\u0e04\u0e23\u0e31\u0e49\u0e07\u0e41\u0e23\u0e01\u0e17\u0e35\u0e48\u0e1a\u0e23\u0e23\u0e17\u0e31\u0e14 "
+                            f"{first_def} \u2014 \u0e08\u0e30\u0e17\u0e33\u0e43\u0e2b\u0e49\u0e40\u0e01\u0e34\u0e14 NameError \u0e15\u0e2d\u0e19\u0e40\u0e23\u0e19\u0e40\u0e14\u0e2d\u0e23\u0e4c",
+                        ))
+                        reported.add(name)
+
+            def _enter_function(self, node):
+                child = _Scope("function", parent=scope)
+                args = node.args
+                for a in list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs):
+                    child.define(a.arg, node.lineno)
+                if args.vararg:
+                    child.define(args.vararg.arg, node.lineno)
+                if args.kwarg:
+                    child.define(args.kwarg.arg, node.lineno)
+                _collect(node.body, child)
+                check_scope(node.body, child)
+                # defaults & decorators execute in the ENCLOSING scope
+                for d in list(args.defaults) + [d for d in args.kw_defaults if d is not None]:
+                    self.visit(d)
+                for d in node.decorator_list:
+                    self.visit(d)
+
+            def visit_FunctionDef(self, node):
+                self._enter_function(node)
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Lambda(self, node):
+                child = _Scope("function", parent=scope)
+                args = node.args
+                for a in list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs):
+                    child.define(a.arg, node.lineno)
+                if args.vararg:
+                    child.define(args.vararg.arg, node.lineno)
+                if args.kwarg:
+                    child.define(args.kwarg.arg, node.lineno)
+                check_scope([node.body], child)
+                for d in list(args.defaults) + [d for d in args.kw_defaults if d is not None]:
+                    self.visit(d)
+
+            def visit_ClassDef(self, node):
+                child = _Scope("class", parent=scope)
+                _collect(node.body, child)
+                check_scope(node.body, child)
+                for base in node.bases:
+                    self.visit(base)
+                for kw in node.keywords:
+                    self.visit(kw)
+                for d in node.decorator_list:
+                    self.visit(d)
+
+            def _comp(self, node):
+                # Simplification: treat the whole comprehension (elt/key/
+                # value + all generators' iters + ifs) as living in the
+                # comprehension's own child scope. Real Python resolves the
+                # OUTERMOST iterable in the enclosing scope instead, but
+                # that distinction essentially never matters for generated
+                # Manim code (comprehensions over already-defined lists),
+                # and erring toward "treat as one scope" only risks a rare
+                # missed false-positive, never a wrong NameError report.
+                child = _Scope("comprehension", parent=scope)
+                for gen in node.generators:
+                    for n in ast.walk(gen.target):
+                        if isinstance(n, ast.Name):
+                            child.define(n.id, node.lineno)
+                parts = [node.elt] if hasattr(node, "elt") else [node.key, node.value]
+                for gen in node.generators:
+                    parts.append(gen.iter)
+                    parts.extend(gen.ifs)
+                check_scope(parts, child)
+
+            visit_ListComp = _comp
+            visit_SetComp = _comp
+            visit_DictComp = _comp
+            visit_GeneratorExp = _comp
+
+        checker = _Checker()
+        if isinstance(body, list):
+            for item in body:
+                checker.visit(item)
+        else:
+            checker.visit(body)
+
+    check_scope(tree.body, module_scope)
+    return violations
+
+
+# ============================================================================
+# TOKEN FIXERS
+# ============================================================================
+
+# Deprecated/forbidden Manim API names → their replacements. All of these
+# are call-site renames (the old name is always followed by '(' in valid
+# usage), so require_call=True is safe and mirrors the intent of each
+# original single-purpose fixer.
+_CALL_RENAMES: dict[str, str] = {
+    "ShowCreation": "Create",
+    "TexMobject": "MathTex",
+    "TextMobject": "Text",
+    "Indicate": "FadeIn",
+    "Flash": "GrowFromCenter",
+    "ApplyWave": "FadeIn",
+}
+
+# Attribute-access call-site rename: axes.get_graph(...) -> axes.plot(...)
+_ATTRIBUTE_CALL_RENAMES: dict[str, str] = {
+    "get_graph": "plot",
+}
+
+
+def fix_deprecated_call_names(code: str, fixes: list[str]) -> str:
+    return replace_bare_names(
+        code, _CALL_RENAMES, require_call=True, fixes=fixes,
+        fix_label="AUTO-FIX: deprecated API",
+    )
+
+
+def fix_deprecated_attribute_names(code: str, fixes: list[str]) -> str:
+    return replace_bare_names(
+        code, _ATTRIBUTE_CALL_RENAMES, require_call=True, require_attribute=True,
+        fixes=fixes, fix_label="AUTO-FIX: deprecated API",
+    )
+
+
+TOKEN_LEVEL_FIXERS = [
+    fix_deprecated_call_names,
+    fix_deprecated_attribute_names,
+]
+
+
+# ============================================================================
+# AST FIXERS
+# ============================================================================
+
+import ast
+
+
+
+def fix_missing_numpy_import(code: str, fixes: list[str]) -> str:
+    """
+    AST-aware insertion of 'import numpy as np', placed after any shebang,
+    encoding declaration, module docstring, and __future__ imports — never
+    just blindly prepended, which could otherwise land before a
+    `from __future__ import annotations` line and cause a SyntaxError
+    (future imports must be the first statement in the file).
+    """
+    tree = safe_parse(code)
+    if tree is None:
+        return code
+
+    for node in tree.body:
+        if isinstance(node, ast.Import) and any(
+            alias.name == "numpy" and alias.asname == "np" for alias in node.names
+        ):
+            return code  # already imported correctly
+
+    src = Source(code)
+    insert_at_offset = 0
+    body = tree.body
+
+    idx = 0
+    # module docstring
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        idx = 1
+    # __future__ imports (must stay first, so keep them ahead of our import)
+    while idx < len(body) and (
+        isinstance(body[idx], ast.ImportFrom) and body[idx].module == "__future__"
+    ):
+        idx += 1
+
+    if idx < len(body):
+        insert_at_offset = src.offset(body[idx].lineno, 0)
+    else:
+        insert_at_offset = len(code)
+
+    fixes.append("AUTO-FIX: Added 'import numpy as np'")
+    insertion = "import numpy as np\n"
+    return code[:insert_at_offset] + insertion + code[insert_at_offset:]
+
+
+_ZONE_SCALAR_VARS = {
+    "bottom_zone_center_y", "middle_zone_center_y", "top_zone_center_y",
+    "bottom_zone_bottom", "bottom_zone_top",
+    "middle_zone_bottom", "middle_zone_top",
+    "top_zone_bottom", "top_zone_top",
+}
+
+
+def fix_move_to_scalar(code: str, fixes: list[str]) -> str:
+    """.move_to(some_zone_scalar_var) -> .move_to(np.array([0, var, 0]))"""
+    tree = safe_parse(code)
+    if tree is None:
+        return code
+    src = Source(code)
+    edits: list[tuple[int, int, str]] = []
+
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "move_to"
+            and len(node.args) == 1
+        ):
+            continue
+        arg = node.args[0]
+        if isinstance(arg, ast.Name) and arg.id in _ZONE_SCALAR_VARS:
+            start, end = src.span(arg)
+            edits.append((start, end, f"np.array([0, {arg.id}, 0])"))
+            fixes.append(
+                f"AUTO-FIX: .move_to({arg.id}) \u2192 "
+                f".move_to(np.array([0, {arg.id}, 0]))"
+            )
+    return apply_edits(code, edits)
+
+
+def fix_aligned_edge_center(code: str, fixes: list[str]) -> str:
+    """aligned_edge=CENTER doesn't exist in Manim -> aligned_edge=LEFT."""
+    tree = safe_parse(code)
+    if tree is None:
+        return code
+    src = Source(code)
+    edits: list[tuple[int, int, str]] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.keyword) and node.arg == "aligned_edge":
+            if isinstance(node.value, ast.Name) and node.value.id == "CENTER":
+                start, end = src.span(node.value)
+                edits.append((start, end, "LEFT"))
+                fixes.append(
+                    "AUTO-FIX: aligned_edge=CENTER \u2192 aligned_edge=LEFT "
+                    "(CENTER doesn't exist in Manim)"
+                )
+    return apply_edits(code, edits)
+
+
+def fix_font_in_mathtex(code: str, fixes: list[str]) -> str:
+    """Remove font= kwarg from MathTex()/Tex() calls (not a supported param)."""
+    tree = safe_parse(code)
+    if tree is None:
+        return code
+    src = Source(code)
+    edits: list[tuple[int, int, str]] = []
+
+    for call in find_calls(tree, {"MathTex", "Tex"}):
+        kw = get_keyword(call, "font")
+        if kw is None:
+            continue
+        # Remove "font=<value>" plus one adjacent comma (prefer the comma
+        # that precedes it, matching how the original arg list reads).
+        kw_start, kw_end = src.span(kw)
+        # kw.value doesn't include "font=" itself in its span, so walk back
+        # to find the '=' and the arg name by re-deriving the start from
+        # the keyword node's own position (ast.keyword has its own lineno
+        # in modern Python — use it directly).
+        start = src.offset(kw.lineno, kw.col_offset)
+        end = kw_end
+        before = code[:start]
+        after = code[end:]
+        # Consume a leading ", " before this kwarg if present, else a
+        # trailing ", " after it.
+        stripped_before = before.rstrip()
+        if stripped_before.endswith(","):
+            start -= (len(before) - len(stripped_before)) + 1
+        else:
+            stripped_after = after.lstrip()
+            consumed = len(after) - len(stripped_after)
+            if stripped_after.startswith(","):
+                end += consumed + 1
+        edits.append((start, end, ""))
+        fixes.append("AUTO-FIX: Removed font= parameter from MathTex/Tex (not supported)")
+    return apply_edits(code, edits)
+
+
 MAX_TEXT_FONT_SIZE = 28
 MAX_MATHTEX_FONT_SIZE = 20
+MAX_AXES_X_LENGTH = 5.4
+MAX_AXES_Y_LENGTH = 4.3
 
 
-def _safe_identifier_replace(code: str, old: str, new: str) -> tuple[str, int]:
+def _clamp_numeric_keyword(
+    code: str, tree: ast.Module, src: "Source", *, call_names, kw_name, max_value, label,
+) -> tuple[str, list[str]]:
+    edits: list[tuple[int, int, str]] = []
+    fixes: list[str] = []
+    for call in find_calls(tree, call_names):
+        kw = get_keyword(call, kw_name)
+        if kw is None or not isinstance(kw.value, ast.Constant):
+            continue
+        val = kw.value.value
+        if not isinstance(val, (int, float)) or isinstance(val, bool):
+            continue
+        if val > max_value:
+            start, end = src.span(kw.value)
+            clamped = int(max_value) if float(max_value).is_integer() else max_value
+            edits.append((start, end, repr(clamped)))
+            fixes.append(f"AUTO-FIX: {label} {kw_name}={val} > {max_value} \u2192 clamped to {clamped}")
+    return apply_edits(code, edits), fixes
+
+
+def fix_font_size_too_large(code: str, fixes: list[str]) -> str:
+    """Clamp MathTex()/Tex() font_size to 20, Text() font_size to 28 — the
+    same hard cap in every zone (see prompts.py rule 10 / table 5F)."""
+    tree = safe_parse(code)
+    if tree is None:
+        return code
+    src = Source(code)
+    code, math_fixes = _clamp_numeric_keyword(
+        code, tree, src, call_names={"MathTex", "Tex"},
+        kw_name="font_size", max_value=MAX_MATHTEX_FONT_SIZE, label="MathTex/Tex font_size",
+    )
+    fixes.extend(math_fixes)
+    tree = safe_parse(code)  # re-parse: positions shifted after edits above
+    if tree is None:
+        return code
+    src = Source(code)
+    code, text_fixes = _clamp_numeric_keyword(
+        code, tree, src, call_names={"Text"},
+        kw_name="font_size", max_value=MAX_TEXT_FONT_SIZE, label="Text font_size",
+    )
+    fixes.extend(text_fixes)
+    return code
+
+
+def fix_axes_too_large(code: str, fixes: list[str]) -> str:
+    """Clamp x_length/y_length keyword args (on any call, matching the
+    original's non-call-specific behavior) to the same limits enforced
+    everywhere else in this pipeline and in prompts.py rule 9."""
+    tree = safe_parse(code)
+    if tree is None:
+        return code
+    src = Source(code)
+
+    edits: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.keyword):
+            continue
+        if node.arg not in ("x_length", "y_length"):
+            continue
+        if not isinstance(node.value, ast.Constant):
+            continue
+        val = node.value.value
+        if not isinstance(val, (int, float)) or isinstance(val, bool):
+            continue
+        limit = MAX_AXES_X_LENGTH if node.arg == "x_length" else MAX_AXES_Y_LENGTH
+        if val > limit:
+            start, end = src.span(node.value)
+            edits.append((start, end, repr(limit)))
+            fixes.append(f"AUTO-FIX: {node.arg}={val} > {limit} \u2192 clamped to {limit}")
+    return apply_edits(code, edits)
+
+
+def fix_include_numbers_in_axis_config(code: str, fixes: list[str]) -> str:
     """
-    Replace bare-word occurrences of `old` with `new`, skipping any
-    occurrence that falls inside a comment or a string literal.
-
-    This is the token-aware alternative to `code.replace(old, new)` for
-    renames like `ShowCreation(` -> `Create(`: a plain `.replace()` will
-    happily rewrite text inside a `# comment` or inside an unrelated
-    string such as "Use ShowCreation(...)", silently corrupting content
-    that was never meant to be touched. Tokenizing lets us only rewrite
-    NAME tokens that are actual Python identifiers in code.
-
-    Falls back to a plain string replace if the source doesn't tokenize
-    (e.g. it's already broken); an auto-fixer should never be the thing
-    that turns fixable code into a hard failure.
-
-    Returns (new_code, num_replacements).
+    Remove 'include_numbers' from an axis_config={...} dict (but NOT from
+    x_axis_config/y_axis_config, where it's legitimate) — uses the AST
+    dict's actual key/value nodes instead of line-based INDENT-sensitive
+    scanning, so it's correct regardless of how the dict is formatted.
     """
-    old_name = old.rstrip("(")
-    try:
-        tokens = list(tokenize.generate_tokens(io.StringIO(code).readline))
-    except (tokenize.TokenizeError, IndentationError, SyntaxError):
-        count = code.count(old)
-        return code.replace(old, new), count
+    tree = safe_parse(code)
+    if tree is None:
+        return code
+    src = Source(code)
+    edits: list[tuple[int, int, str]] = []
 
-    count = 0
-    out_tokens = []
-    for tok in tokens:
-        if tok.type == tokenize.NAME and tok.string == old_name:
-            count += 1
-            out_tokens.append(tok._replace(string=new.rstrip("(")))
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.keyword) and node.arg == "axis_config"):
+            continue
+        if not isinstance(node.value, ast.Dict):
+            continue
+        d = node.value
+        for key, value in zip(d.keys, d.values):
+            if (
+                isinstance(key, ast.Constant)
+                and key.value == "include_numbers"
+            ):
+                pair_start, _ = src.span(key)
+                _, pair_end = src.span(value)
+                # Consume a trailing ", " (or leading ", " if this was the
+                # last item) so we don't leave a dangling comma behind.
+                after = code[pair_end:]
+                before = code[:pair_start]
+                stripped_after = after.lstrip()
+                consumed_after = len(after) - len(stripped_after)
+                if stripped_after.startswith(","):
+                    pair_end += consumed_after + 1
+                    # also eat one following space so we don't leave "{  'x'"
+                    if pair_end < len(code) and code[pair_end] == " ":
+                        pair_end += 1
+                else:
+                    stripped_before = before.rstrip()
+                    if stripped_before.endswith(","):
+                        pair_start -= (len(before) - len(stripped_before)) + 1
+                edits.append((pair_start, pair_end, ""))
+                fixes.append(
+                    "AUTO-FIX: Removed 'include_numbers' from axis_config "
+                    "(not x_axis_config/y_axis_config, which keep it)"
+                )
+    return apply_edits(code, edits)
+
+
+def fix_bottom_zone_bottom_typo(code: str, fixes: list[str]) -> str:
+    """
+    bottom_center = np.array([0, bottom_zone_bottom, 0])
+      -> bottom_center = np.array([0, bottom_zone_center_y, 0])
+
+    Deliberately narrow (matches the original regex's exact scope, not a
+    blanket rename): `bottom_zone_bottom` is ALSO a distinct, LEGITIMATELY
+    correct boilerplate variable elsewhere (the bottom edge Y-coordinate,
+    as opposed to bottom_zone_center_y, the center Y-coordinate) — a
+    blanket rename of every occurrence would corrupt that unrelated,
+    correct usage. This only touches the second element of the literal
+    [0, ..., 0] list passed to np.array(...) when assigned to bottom_center.
+    """
+    tree = safe_parse(code)
+    if tree is None:
+        return code
+    src = Source(code)
+    edits: list[tuple[int, int, str]] = []
+
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "bottom_center"
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr == "array"
+            and node.value.args
+            and isinstance(node.value.args[0], ast.List)
+        ):
+            continue
+        elts = node.value.args[0].elts
+        if len(elts) == 3 and isinstance(elts[1], ast.Name) and elts[1].id == "bottom_zone_bottom":
+            start, end = src.span(elts[1])
+            edits.append((start, end, "bottom_zone_center_y"))
+            fixes.append(
+                "AUTO-FIX: bottom_center used bottom_zone_bottom \u2192 bottom_zone_center_y"
+            )
+    return apply_edits(code, edits)
+
+
+PHASE_1B_FIXERS = [
+    fix_missing_numpy_import,
+    fix_bottom_zone_bottom_typo,
+    fix_move_to_scalar,
+    fix_aligned_edge_center,
+    fix_font_in_mathtex,
+    fix_font_size_too_large,
+    fix_axes_too_large,
+    fix_include_numbers_in_axis_config,
+]
+
+
+# ============================================================================
+# STRING FIXERS
+# ============================================================================
+
+import ast
+import re
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# LaTeX command table — shared across several fixers below
+# ─────────────────────────────────────────────────────────────────────────
+_KNOWN_LATEX_COMMANDS = [
+    "frac", "sqrt", "lambda", "Lambda", "phi", "Phi", "theta", "Theta",
+    "Delta", "delta", "pi", "Pi", "mathrm", "mathbf", "cdot", "times",
+    "approx", "circ", "alpha", "beta", "gamma", "Gamma", "sigma", "Sigma",
+    "omega", "Omega", "mu", "nu", "epsilon", "rho", "tau", "chi", "psi",
+    "eta", "xi", "zeta", "vec", "hat", "pm", "leq", "geq", "neq",
+    "Rightarrow", "rightarrow", "Leftarrow", "leftarrow", "quad", "qquad",
+    "left", "right", "infty", "sum", "int", "partial", "equiv", "propto",
+]
+
+_LATEX_TO_UNICODE = {
+    "lambda": "\u03bb", "Lambda": "\u039b", "phi": "\u03c6", "Phi": "\u03a6",
+    "theta": "\u03b8", "Theta": "\u0398", "alpha": "\u03b1", "beta": "\u03b2",
+    "gamma": "\u03b3", "Gamma": "\u0393", "delta": "\u03b4", "Delta": "\u0394",
+    "pi": "\u03c0", "Pi": "\u03a0", "sigma": "\u03c3", "omega": "\u03c9",
+    "Omega": "\u03a9", "mu": "\u03bc", "nu": "\u03bd", "epsilon": "\u03b5",
+    "rho": "\u03c1", "tau": "\u03c4", "chi": "\u03c7", "psi": "\u03c8",
+    "eta": "\u03b7", "xi": "\u03be", "zeta": "\u03b6",
+    "vec": "", "hat": "", "frac": "/", "cdot": "\u00b7", "times": "\u00d7",
+    "pm": "\u00b1", "leq": "\u2264", "geq": "\u2265", "neq": "\u2260",
+    "approx": "\u2248", "sqrt": "\u221a", "circ": "\u00b0", "infty": "\u221e",
+    "mathrm": "", "mathbf": "",
+}
+
+_THAI_RANGE = re.compile(r"[\u0E00-\u0E7F]")
+
+# A run of 2+ literal backslashes immediately before a known LaTeX command
+# (or a spacing command \, \; \!) inside a raw string collapses to exactly
+# one backslash — this is the root cause of the "mathrm{m/s}" garbled-text
+# bug: a raw string keeps every backslash literally, so r'...\\\\frac...'
+# (2 real backslash chars) reaches LaTeX as "\\" (newline) + "frac{...}"
+# printed as plain text instead of being interpreted as \frac.
+_cmd_alt = "|".join(_KNOWN_LATEX_COMMANDS)
+_OVER_ESCAPED_PATTERN = re.compile(rf"\\{{2,}}(?=(?:{_cmd_alt})\b|[,;!])")
+
+def _fix_mathtex_content(content: str, is_raw: bool, fixes: list[str]) -> str:
+    """
+    Apply the MathTex/Tex-specific content fixes to the RAW string content
+    (the exact source text between the quotes, before Python ever decodes
+    it — see the module docstring for why that matters).
+
+    Because we work on raw source text, a single backslash character here
+    means exactly one backslash character in the source regardless of
+    whether the string is raw-prefixed or not — the string hasn't been
+    Python-decoded yet. So the over-escape collapse (2+ backslashes before
+    a known LaTeX command -> 1) applies identically either way. The only
+    thing that differs between raw and non-raw strings is what happens
+    AFTER this function returns: a non-raw string needs an 'r' prefix
+    added at the call site (handled by the caller) so that Python's own
+    parser doesn't later eat a sequence like '\\theta' as TAB+'heta' when
+    the generated file is actually executed. We deliberately do NOT modify
+    the backslash count differently based on is_raw — doing so double-
+    counted the fix (this was caught by the test suite): the correct
+    single fix is "collapse over-escaping in the raw text" + "ensure an r
+    prefix is present if any backslash remains", never both an r-prefix
+    AND a backslash-doubling for the same content.
+    """
+    original = content
+    new_content = _OVER_ESCAPED_PATTERN.sub("\\\\", content)
+
+    # \text{...} inside MathTex isn't valid LaTeX in Manim's renderer —
+    # \mathrm{...} is, for ASCII-only content.
+    def _text_to_mathrm(m: re.Match) -> str:
+        inner = m.group(1)
+        if all(ord(c) < 128 for c in inner):
+            return f"\\mathrm{{{inner}}}"
+        return m.group(0)
+    new_content = re.sub(r"\\text\{([^}]*)\}", _text_to_mathrm, new_content)
+
+    # Thai characters inside \mathrm{...} — LaTeX can't render Thai at all.
+    def _strip_thai_from_mathrm(m: re.Match) -> str:
+        inner = m.group(1)
+        if not _THAI_RANGE.search(inner):
+            return m.group(0)
+        ascii_only = "".join(c for c in inner if ord(c) < 128)
+        return f"\\mathrm{{{ascii_only}}}" if ascii_only.strip() else ""
+    new_content = re.sub(r"\\mathrm\{([^}]*)\}", _strip_thai_from_mathrm, new_content)
+
+    # Empty \mathrm{}
+    new_content = new_content.replace("\\mathrm{}", "")
+
+    if new_content != original:
+        fixes.append(
+            f"AUTO-FIX: Fixed LaTeX content in MathTex/Tex: "
+            f"{original[:40]!r} \u2192 {new_content[:40]!r}"
+        )
+    return new_content
+
+
+def _fix_text_content(content: str, fixes: list[str]) -> str:
+    """Apply Text()-specific content fixes: strip LaTeX symbols (replace
+    with unicode or drop), since Text() cannot render LaTeX at all."""
+    original = content
+    new_content = content
+
+    # \command{...} -> just the inner content (e.g. \mathrm{m/s} -> m/s)
+    def _brace_cmd(m: re.Match) -> str:
+        cmd, inner = m.group(1), m.group(2)
+        return inner
+    new_content = re.sub(
+        r"\\(" + "|".join(re.escape(c) for c in _KNOWN_LATEX_COMMANDS) + r")\{([^}]*)\}",
+        _brace_cmd, new_content,
+    )
+
+    # bare \command (no braces) -> unicode symbol or drop
+    for cmd, uni in sorted(_LATEX_TO_UNICODE.items(), key=lambda kv: -len(kv[0])):
+        new_content = new_content.replace(f"\\{cmd}", uni)
+
+    # \( \) \[ \] leftovers
+    new_content = re.sub(r"\\[()\[\]]", "", new_content)
+
+    if new_content != original:
+        fixes.append(
+            f"AUTO-FIX: Replaced LaTeX symbols with unicode in Text(): "
+            f"{original[:40]!r} \u2192 {new_content[:40]!r}"
+        )
+    return new_content
+
+
+def fix_string_contents(code: str, fixes: list[str]) -> str:
+    """
+    Walk every MathTex()/Tex()/Text() call, find its first positional
+    argument IF it's a literal string (skip anything dynamic — an f-string,
+    a variable, a .format() call — exactly matching feedback item 7's
+    recommendation to ignore dynamically generated text), and rewrite its
+    raw source content in place.
+    """
+    tree = safe_parse(code)
+    if tree is None:
+        return code
+    src = Source(code)
+    edits: list[tuple[int, int, str]] = []
+
+    for call in find_calls(tree, {"MathTex", "Tex", "Text"}):
+        if not call.args:
+            continue
+        arg = call.args[0]
+        if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+            continue  # dynamic content (f-string, variable, etc.) — skip
+
+        raw = src.text(arg)
+        try:
+            prefix, quote, content, _ = split_string_prefix_and_quote(raw)
+        except ValueError:
+            continue
+
+        is_mathtex = call.func.id in ("MathTex", "Tex")
+        is_raw = "r" in prefix.lower()
+
+        if is_mathtex:
+            new_content = _fix_mathtex_content(content, is_raw, fixes)
+            # If the (possibly now-fixed) content contains a backslash and
+            # the string isn't already raw, add the r-prefix so Python's
+            # own parser won't later decode e.g. '\theta' into a literal
+            # TAB character + 'heta' when the generated file is executed.
+            if not is_raw and "\\" in new_content:
+                new_prefix = prefix + "r"
+                fixes.append(
+                    "AUTO-FIX: Added missing r-prefix to MathTex/Tex string "
+                    "containing a backslash (prevents Python from silently "
+                    "eating LaTeX escapes like \\theta as control characters)"
+                )
+            else:
+                new_prefix = prefix
         else:
-            out_tokens.append(tok)
+            new_content = _fix_text_content(content, fixes)
+            new_prefix = prefix
 
-    if count == 0:
-        return code, 0
+        # Normalize double-quoted -> single-quoted only when content has no
+        # unescaped single quote (matches original behavior/intent).
+        new_quote = quote
+        if quote == '"' and "'" not in new_content:
+            new_quote = "'"
+            fixes.append(f"AUTO-FIX: Double-quoted string in {call.func.id}() \u2192 single quotes")
 
-    try:
-        new_code = tokenize.untokenize(out_tokens)
-    except Exception:
-        # untokenize can be finicky about exact whitespace round-tripping;
-        # if it fails, don't risk corrupting the file — fall back to the
-        # plain (less safe, but at least predictable) string replace.
-        return code.replace(old, new), code.count(old)
+        if new_content != content or new_prefix != prefix or new_quote != quote:
+            start, end = src.span(arg)
+            edits.append((start, end, f"{new_prefix}{new_quote}{new_content}{new_quote}"))
 
-    return new_code, count
+    return apply_edits(code, edits)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ============================================================================
+# STRUCTURAL FIXERS
+# ============================================================================
+
+import ast
+import re
+
+
+_THAI_LONG = re.compile(r"[\u0E00-\u0E7F]{15,}")
+
+
+def _indent_of(src: Source, node: ast.AST) -> str:
+    """
+    Leading whitespace of the STATEMENT this node's line belongs to — i.e.
+    the actual code indentation, not the column the node itself happens to
+    start at. For a bare expression statement (`VGroup(...)` on its own
+    line) those are the same thing; for `var = VGroup(...)`, the call
+    starts partway through the line (after "var = "), so we walk back from
+    the node's start to the true start of that physical line and count
+    leading spaces there instead of at the node's own column.
+    """
+    start_offset, _ = src.span(node)
+    line_start = src.code.rfind("\n", 0, start_offset) + 1
+    line_end = src.code.find("\n", line_start)
+    if line_end == -1:
+        line_end = len(src.code)
+    line_text = src.code[line_start:line_end]
+    stripped = line_text.lstrip(" ")
+    return " " * (len(line_text) - len(stripped))
+
+
+def fix_vgroup_list_comprehension(code: str, fixes: list[str]) -> str:
+    """
+    VGroup(*[Text(line, ...) for line in [...]]) or
+    VGroup(*[Text(line, ...) for line in some_list_var])
+    -> VGroup(Text('a', ...), Text('b', ...), ...)
+
+    Handles both the inline-list-literal form and the named-variable form
+    (matching the original fixer's two supported patterns), but computes
+    indentation from the actual call site instead of assuming a fixed
+    nesting depth.
+    """
+    tree = safe_parse(code)
+    if tree is None:
+        return code
+    src = Source(code)
+    edits: list[tuple[int, int, str]] = []
+
+    # Collect module-level "name = ['a', 'b', ...]" string-list assignments,
+    # for the named-variable form.
+    list_vars: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.List)
+        ):
+            strs = []
+            ok = True
+            for elt in node.value.elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    strs.append(elt.value)
+                else:
+                    ok = False
+                    break
+            if ok and strs:
+                list_vars[node.targets[0].id] = strs
+
+    for call in ast.walk(tree):
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                and call.func.id == "VGroup"):
+            continue
+        if len(call.args) != 1 or not isinstance(call.args[0], ast.Starred):
+            continue
+        starred = call.args[0]
+        if not isinstance(starred.value, ast.ListComp):
+            continue
+        comp = starred.value
+        if len(comp.generators) != 1:
+            continue
+        gen = comp.generators[0]
+        # elt must itself be a Call like Text(loop_var, kw=..., ...)
+        if not (
+            isinstance(comp.elt, ast.Call)
+            and isinstance(comp.elt.func, ast.Name)
+            and comp.elt.args
+            and isinstance(comp.elt.args[0], ast.Name)
+            and isinstance(gen.target, ast.Name)
+            and comp.elt.args[0].id == gen.target.id
+        ):
+            continue
+
+        ctor = comp.elt.func.id
+        # Reconstruct the "rest of the args" (everything after the loop
+        # variable) exactly as written, using its own raw source span.
+        if len(comp.elt.args) > 1 or comp.elt.keywords:
+            first_extra = comp.elt.args[1] if len(comp.elt.args) > 1 else comp.elt.keywords[0]
+            rest_start, _ = src.span(first_extra)
+            _, call_end = src.span(comp.elt)
+            # trim the trailing ')'
+            rest_text = code[rest_start:call_end].rstrip()
+            if rest_text.endswith(")"):
+                rest_text = rest_text[:-1].rstrip()
+        else:
+            rest_text = ""
+
+        strings: list[str] | None = None
+        if isinstance(gen.iter, ast.List):
+            strs = []
+            ok = True
+            for elt in gen.iter.elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    strs.append(elt.value)
+                else:
+                    ok = False
+                    break
+            if ok and strs:
+                strings = strs
+        elif isinstance(gen.iter, ast.Name) and gen.iter.id in list_vars:
+            strings = list_vars[gen.iter.id]
+
+        if not strings:
+            continue
+
+        indent = _indent_of(src, call)
+        inner_indent = indent + "    "
+        rest_suffix = f", {rest_text}" if rest_text else ""
+        parts = [f"{ctor}('{item}'{rest_suffix})" for item in strings]
+        replacement = (
+            "VGroup(\n"
+            + ",\n".join(f"{inner_indent}{p}" for p in parts)
+            + f"\n{indent})"
+        )
+        start, end = src.span(call)
+        edits.append((start, end, replacement))
+        fixes.append(
+            f"AUTO-FIX: Expanded VGroup(*[{ctor}(var, ...) for var in ...]) "
+            f"\u2192 VGroup({ctor}(...), ...) with {len(strings)} items "
+            f"(indentation matched to actual call site)"
+        )
+
+    return apply_edits(code, edits)
+
+
+def fix_long_mathtex(code: str, fixes: list[str]) -> str:
+    """
+    var = MathTex(r'... > 40 chars ...', font_size=20)
+    -> var = VGroup(MathTex(...), MathTex(...)).arrange(DOWN, ...)
+
+    Splits at the first top-level '=' in the LaTeX, else the last comma.
+    Indentation is computed from the Assign statement's own column, not a
+    hardcoded guess.
+    """
+    tree = safe_parse(code)
+    if tree is None:
+        return code
+    src = Source(code)
+    edits: list[tuple[int, int, str]] = []
+
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "MathTex"
+            and node.value.args
+            and isinstance(node.value.args[0], ast.Constant)
+            and isinstance(node.value.args[0].value, str)
+        ):
+            continue
+
+        var = node.targets[0].id
+        raw = src.text(node.value.args[0])
+        try:
+            prefix, quote, content, _ = split_string_prefix_and_quote(raw)
+        except ValueError:
+            continue
+        if len(content) <= 40:
+            continue
+
+        depth = 0
+        split_idx = None
+        for i, ch in enumerate(content):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            elif depth == 0 and ch == "=":
+                split_idx = i
+                break
+        if split_idx is None:
+            split_idx = content.rfind(",")
+            if split_idx == -1:
+                continue
+        first = content[:split_idx + 1].strip()
+        second = content[split_idx + 1:].strip()
+        if not first or not second:
+            continue
+
+        indent = _indent_of(src, node)
+        inner_indent = indent + "    "
+        replacement = (
+            f"{var} = VGroup(\n"
+            f"{inner_indent}MathTex({prefix}{quote}{first}{quote}, font_size=20),\n"
+            f"{inner_indent}MathTex({prefix}{quote}{second}{quote}, font_size=20),\n"
+            f"{indent}).arrange(DOWN, aligned_edge=LEFT, buff=0.15)\n"
+            f"{indent}{var}.scale_to_fit_width(frame_width * 0.88)"
+        )
+        start, end = src.span(node)
+        edits.append((start, end, replacement))
+        fixes.append(
+            f"AUTO-FIX: Split long MathTex ({len(content)} chars) into two "
+            f"lines via VGroup (indentation matched to actual assignment)"
+        )
+
+    return apply_edits(code, edits)
+
+
+def fix_arrange_right_long_thai(code: str, fixes: list[str]) -> str:
+    """
+    VGroup(Text('long thai label...'), MathTex(...)).arrange(RIGHT, ...)
+    -> ...arrange(DOWN, aligned_edge=LEFT, buff=0.15)
+
+    Unlike the original (which scanned up to 20 PHYSICAL LINES backward
+    looking for a Text() call, a fragile heuristic that breaks on unusual
+    formatting), this walks the actual VGroup(...) call's own arguments via
+    the AST, so it works regardless of line layout.
+    """
+    tree = safe_parse(code)
+    if tree is None:
+        return code
+    src = Source(code)
+    edits: list[tuple[int, int, str]] = []
+
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "arrange"
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "RIGHT"
+        ):
+            continue
+        target = node.func.value
+        if not (
+            isinstance(target, ast.Call)
+            and isinstance(target.func, ast.Name)
+            and target.func.id == "VGroup"
+        ):
+            continue
+
+        has_long_thai = False
+        for element in target.args:
+            if (
+                isinstance(element, ast.Call)
+                and isinstance(element.func, ast.Name)
+                and element.func.id == "Text"
+                and element.args
+                and isinstance(element.args[0], ast.Constant)
+                and isinstance(element.args[0].value, str)
+                and _THAI_LONG.search(element.args[0].value)
+            ):
+                has_long_thai = True
+                break
+        if not has_long_thai:
+            continue
+
+        # Replace the argument list of .arrange(...) with the DOWN form,
+        # preserving nothing else about the call (matches original intent).
+        start, end = src.span(node)
+        call_head_end = src.span(node.func)[1]  # end of ".arrange"
+        replacement = code[start:call_head_end] + "(DOWN, aligned_edge=LEFT, buff=0.15)"
+        edits.append((start, end, replacement))
+        fixes.append(
+            "AUTO-FIX: .arrange(RIGHT) with long Thai Text (found via AST, "
+            "not line-scanning) \u2192 .arrange(DOWN, aligned_edge=LEFT) to prevent overflow"
+        )
+
+    return apply_edits(code, edits)
+
+
+PHASE_1D_FIXERS = [
+    fix_vgroup_list_comprehension,
+    fix_long_mathtex,
+    fix_arrange_right_long_thai,
+]
+
+
+# ============================================================================
+# DETECTORS
+# ============================================================================
+
+import ast
+import re
+from dataclasses import dataclass, field
+
+
+_THAI_RANGE = re.compile(r"[\u0E00-\u0E7F]")
+_THAI_LONG = re.compile(r"[\u0E00-\u0E7F]{15,}")
+
+
 @dataclass
 class Violation:
     rule: str
@@ -111,1575 +1430,16 @@ class ValidationResult:
     def violation_summary(self) -> str:
         if not self.violations:
             return "No violations found."
-        lines = ["RULE VIOLATIONS FOUND — แก้ทุกข้อต่อไปนี้:"]
+        lines = ["RULE VIOLATIONS FOUND \u2014 \u0e41\u0e01\u0e49\u0e17\u0e38\u0e01\u0e02\u0e49\u0e2d\u0e15\u0e48\u0e2d\u0e44\u0e1b\u0e19\u0e35\u0e49:"]
         for i, v in enumerate(self.violations, 1):
             lines.append(
-                f"{i}. [{v.rule}] บรรทัด {v.line}: {v.description}\n"
-                f"   โค้ดที่ผิด: {v.snippet}"
+                f"{i}. [{v.rule}] \u0e1a\u0e23\u0e23\u0e17\u0e31\u0e14 {v.line}: {v.description}\n"
+                f"   \u0e42\u0e04\u0e49\u0e14\u0e17\u0e35\u0e48\u0e1c\u0e34\u0e14: {v.snippet}"
             )
         return "\n".join(lines)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 1 helpers — expanded auto-fixers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _fix_bottom_zone_bottom(code: str, fixes: list[str]) -> str:
-    pattern = re.compile(
-        r'bottom_center\s*=\s*np\.array\(\[0,\s*bottom_zone_bottom\s*,\s*0\]\)'
-    )
-    if pattern.search(code):
-        fixes.append("AUTO-FIX: bottom_center used bottom_zone_bottom → bottom_zone_center_y")
-        code = pattern.sub('bottom_center = np.array([0, bottom_zone_center_y, 0])', code)
-    return code
-
-
-def _fix_include_numbers_in_axis_config(code: str, fixes: list[str]) -> str:
-    lines = code.splitlines()
-    in_axis_config = False
-    result_lines = []
-    for line in lines:
-        if re.search(r'\baxis_config\s*=\s*\{', line) and not re.search(r'[xy]_axis_config', line):
-            in_axis_config = True
-        if in_axis_config:
-            if '}' in line:
-                in_axis_config = False
-            if re.search(r"'include_numbers'\s*:", line):
-                fixes.append(f"AUTO-FIX: Removed 'include_numbers' from axis_config: {line.strip()}")
-                continue
-        result_lines.append(line)
-    return '\n'.join(result_lines)
-
-
-def _fix_text_in_mathtex(code: str, fixes: list[str]) -> str:
-    pattern = re.compile(r'\\\\text\{([^}]*)\}')
-    def replacer(m):
-        content = m.group(1)
-        if all(ord(c) < 128 for c in content):
-            fixes.append(f"AUTO-FIX: \\text{{{content}}} → \\mathrm{{{content}}}")
-            return f'\\\\mathrm{{{content}}}'
-        return m.group(0)
-    return pattern.sub(replacer, code)
-
-
-def _fix_single_backslash_lambda(code: str, fixes: list[str]) -> str:
-    dangerous_sequences = {
-        r'\lambda': r'\\lambda', r'\Lambda': r'\\Lambda',
-        r'\frac': r'\\frac', r'\phi': r'\\phi', r'\Phi': r'\\Phi',
-        r'\Delta': r'\\Delta', r'\delta': r'\\delta',
-        r'\theta': r'\\theta', r'\Theta': r'\\Theta',
-        r'\pi': r'\\pi', r'\Pi': r'\\Pi',
-        r'\mathrm': r'\\mathrm', r'\mathbf': r'\\mathbf',
-        r'\cdot': r'\\cdot', r'\times': r'\\times',
-        r'\sqrt': r'\\sqrt', r'\approx': r'\\approx',
-        r'\circ': r'\\circ', r'\alpha': r'\\alpha',
-        r'\beta': r'\\beta', r'\gamma': r'\\gamma', r'\Gamma': r'\\Gamma',
-        r'\sigma': r'\\sigma', r'\omega': r'\\omega', r'\Omega': r'\\Omega',
-        r'\mu': r'\\mu', r'\nu': r'\\nu',
-        r'\vec': r'\\vec', r'\hat': r'\\hat',
-        r'\pm': r'\\pm', r'\leq': r'\\leq', r'\geq': r'\\geq', r'\neq': r'\\neq',
-        r'\,': r'\\,', r'\;': r'\\;', r'\!': r'\\!',
-    }
-    pattern = re.compile(r"(MathTex|Tex)\s*\(\s*(f)?'([^']*)'")
-    def replacer(m):
-        call, f_prefix, content = m.group(1), m.group(2) or '', m.group(3)
-        original = content
-        for bad, good in dangerous_sequences.items():
-            if bad in content:
-                content = content.replace(bad, good)
-        if content != original:
-            fixes.append(f"AUTO-FIX: Fixed backslash escapes in {call}({f_prefix}'{original[:40]}...')")
-        return f"{call}({f_prefix}'{content}'"
-    return pattern.sub(replacer, code)
-
-
-def _fix_long_mathtex(code: str, fixes: list[str]) -> str:
-    """
-    Split MathTex with > 40 chars into a VGroup of multiple MathTex lines.
-    Splits at '=', '\approx', or after a comma, whichever comes first.
-    Preserves exact Python indentation of the replaced line.
-    """
-    pattern = re.compile(
-        r'^(\s*)(\w+)\s*=\s*MathTex\s*\(\s*r\'(.*?)\'\s*(?:,\s*[^)]*)?\)',
-        re.MULTILINE
-    )
-    def replacer(m):
-        indent, var, content = m.group(1), m.group(2), m.group(3)
-        if len(content) <= 40:
-            return m.group(0)
-        # Try to split at first '=' or '\approx' that is not inside braces
-        depth = 0
-        split_idx = None
-        for i, ch in enumerate(content):
-            if ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-            if depth == 0 and ch == '=':
-                split_idx = i
-                break
-        if split_idx is None:
-            # fallback: split at last comma
-            split_idx = content.rfind(',')
-            if split_idx == -1:
-                return m.group(0)  # no safe split
-        first = content[:split_idx+1].strip()
-        second = content[split_idx+1:].strip()
-        if not first or not second:
-            return m.group(0)
-        fixes.append(f"AUTO-FIX: Split long MathTex '{content[:40]}...' into two lines")
-        return (
-            f"{indent}{var} = VGroup(\n"
-            f"{indent}    MathTex(r'{first}', font_size=26),\n"
-            f"{indent}    MathTex(r'{second}', font_size=26),\n"
-            f"{indent}).arrange(DOWN, aligned_edge=LEFT, buff=0.15)\n"
-            f"{indent}{var}.scale_to_fit_width(frame_width * 0.88)"
-        )
-    return pattern.sub(replacer, code)
-
-
-def _fix_over_escaped_latex(code: str, fixes: list[str]) -> str:
-    """
-    Collapse over-escaped LaTeX commands inside MathTex(r'...')/Tex(r'...') calls.
-
-    ROOT CAUSE: MathTex(r'...') is a raw string. Raw strings do NOT collapse
-    '\\\\' down to '\\' the way a normal Python string does -- every backslash
-    character written in the source survives unchanged into the runtime string.
-    So if the source line contains r'...\\frac...' (two literal backslash
-    characters), LaTeX receives '\\frac' verbatim. LaTeX reads two backslashes
-    as a line-break control symbol ('\\') followed by ordinary text, so the
-    rest of the command ('frac{...}') prints as literal garbled text instead
-    of being interpreted as a command. This is the cause of text like
-    "mathrm{m/s}" appearing verbatim in rendered videos instead of rendering
-    as a fraction/unit.
-
-    This auto-fixer finds MathTex(r'...')/Tex(r'...') calls and collapses any
-    run of 2+ backslashes immediately before a known LaTeX command name (or
-    spacing command like \\, \\; \\!) down to exactly one backslash. It runs
-    regardless of what the LLM was told to do, so it catches the bug even if
-    the generation prompt is ever wrong again.
-    """
-    known_commands = [
-        'frac', 'sqrt', 'lambda', 'Lambda', 'phi', 'Phi', 'theta', 'Theta',
-        'Delta', 'delta', 'pi', 'Pi', 'mathrm', 'mathbf', 'cdot', 'times',
-        'approx', 'circ', 'alpha', 'beta', 'gamma', 'Gamma', 'sigma', 'Sigma',
-        'omega', 'Omega', 'mu', 'nu', 'epsilon', 'rho', 'tau', 'chi', 'psi',
-        'eta', 'xi', 'zeta', 'vec', 'hat', 'pm', 'leq', 'geq', 'neq',
-        'Rightarrow', 'rightarrow', 'Leftarrow', 'leftarrow', 'quad', 'qquad',
-        'left', 'right', 'infty', 'sum', 'int', 'partial', 'equiv', 'propto',
-    ]
-    cmd_alt = '|'.join(known_commands)
-    # Matches a run of 2+ literal backslash characters immediately followed by
-    # a known command name (word boundary) OR by one of the spacing commands.
-    double_bs_pattern = re.compile(rf'\\{{2,}}(?=(?:{cmd_alt})\b|[,;!])')
-
-    pattern = re.compile(r"((?:MathTex|Tex)\s*\(\s*r')([^']*)(')")
-
-    def replacer(m):
-        prefix, content, suffix = m.group(1), m.group(2), m.group(3)
-        new_content = double_bs_pattern.sub(r'\\', content)
-        if new_content != content:
-            fixes.append(
-                "AUTO-FIX: Collapsed over-escaped LaTeX backslash(es) in "
-                f"{prefix.strip()}'{content[:50]}...' -> '{new_content[:50]}...'"
-            )
-        return prefix + new_content + suffix
-
-    return pattern.sub(replacer, code)
-
-
-def _fix_vgroup_list_comprehension(code: str, fixes: list[str]) -> str:
-    """
-    Auto-fix VGroup(*[Text(line, ...) for line in ['a', 'b', 'c']]) →
-    VGroup(Text('a', ...), Text('b', ...), Text('c', ...))
-    """
-    pattern = re.compile(
-        r'VGroup\s*\(\s*\*\s*\[\s*'
-        r'(\w+)\s*\(([\w_]+)\s*,\s*([^]]+?)\)'
-        r'\s*for\s+(\w+)\s+in\s+\[([^\]]+)\]'
-        r'\s*\]\s*\)',
-        re.DOTALL
-    )
-    
-    def replacer(m):
-        ctor = m.group(1)
-        kwargs_str = m.group(3).strip()
-        items_str = m.group(5)
-
-        items = re.findall(r"'([^']*)'|\"([^\"]*)\"", items_str)
-        strings = [a or b for a, b in items]
-
-        if not strings:
-            return m.group(0)
-
-        # Preserve the indentation of the line the match starts on, instead
-        # of hard-coding 12/8-space indents. Hard-coded indentation produces
-        # invalid Python whenever this expression sits inside a method,
-        # conditional, or another nested block with different indentation.
-        line_start = code.rfind('\n', 0, m.start()) + 1
-        indent = re.match(r'[ \t]*', code[line_start:m.start()]).group(0)
-        inner_indent = indent + '    '
-
-        parts = [f"{ctor}('{s}', {kwargs_str})" for s in strings]
-        result = (
-            'VGroup(\n'
-            + ',\n'.join(f'{inner_indent}{p}' for p in parts)
-            + f'\n{indent})'
-        )
-        fixes.append(
-            f"AUTO-FIX: Expanded VGroup(*[{ctor}(var, ...) for var in [...]]) "
-            f"→ VGroup({ctor}(...), ...) with {len(strings)} items (indentation preserved)"
-        )
-        return result
-    
-    new_code = pattern.sub(replacer, code)
-    
-    var_list_pattern = re.compile(
-        r'(\w+)\s*=\s*\[\s*\n?((?:\s*\'[^\']*\',?\s*\n?)+)\s*\]',
-        re.DOTALL
-    )
-    
-    comprehension_pattern = re.compile(
-        r'VGroup\s*\(\s*\*\s*\[\s*\n?\s*'
-        r'(\w+)\s*\(\s*(\w+)\s*,\s*([^]]+?)\)\s*\n?\s*'
-        r'for\s+(\w+)\s+in\s+(\w+)\s*'
-        r'\]\s*\)',
-        re.DOTALL
-    )
-    
-    list_vars = {}
-    for vm in var_list_pattern.finditer(new_code):
-        var_name = vm.group(1)
-        items_block = vm.group(2)
-        strings = re.findall(r"'([^']*)'", items_block)
-        if strings:
-            list_vars[var_name] = strings
-    
-    def comprehension_replacer(m):
-        ctor = m.group(1)
-        kwargs_str = m.group(3).strip()
-        list_name = m.group(5)
-
-        if list_name not in list_vars:
-            return m.group(0)
-
-        strings = list_vars[list_name]
-
-        line_start = new_code.rfind('\n', 0, m.start()) + 1
-        indent = re.match(r'[ \t]*', new_code[line_start:m.start()]).group(0)
-        inner_indent = indent + '    '
-
-        parts = [f"{ctor}('{s}', {kwargs_str})" for s in strings]
-        result = (
-            'VGroup(\n'
-            + ',\n'.join(f'{inner_indent}{p}' for p in parts)
-            + f'\n{indent})'
-        )
-        fixes.append(
-            f"AUTO-FIX: Resolved VGroup(*[{ctor}(line, ...) for line in {list_name}]) "
-            f"→ VGroup({ctor}(...), ...) with {len(strings)} items (indentation preserved)"
-        )
-        return result
-    
-    new_code = comprehension_pattern.sub(comprehension_replacer, new_code)
-    return new_code
-
-
-def _fix_latex_in_text_calls(code: str, fixes: list[str]) -> str:
-    """
-    Auto-fix Text('...\\lambda...') patterns by replacing with unicode.
-    """
-    latex_to_unicode = {
-        r'\\lambda': 'λ',
-        r'\\Lambda': 'Λ',
-        r'\\phi': 'φ',
-        r'\\Phi': 'Φ',
-        r'\\theta': 'θ',
-        r'\\Theta': 'Θ',
-        r'\\alpha': 'α',
-        r'\\beta': 'β',
-        r'\\gamma': 'γ',
-        r'\\Gamma': 'Γ',
-        r'\\delta': 'δ',
-        r'\\Delta': 'Δ',
-        r'\\pi': 'π',
-        r'\\Pi': 'Π',
-        r'\\sigma': 'σ',
-        r'\\omega': 'ω',
-        r'\\Omega': 'Ω',
-        r'\\mu': 'μ',
-        r'\\nu': 'ν',
-        r'\\epsilon': 'ε',
-        r'\\rho': 'ρ',
-        r'\\tau': 'τ',
-        r'\\chi': 'χ',
-        r'\\psi': 'ψ',
-        r'\\eta': 'η',
-        r'\\xi': 'ξ',
-        r'\\zeta': 'ζ',
-        r'\\vec': '',
-        r'\\hat': '',
-        r'\\frac': '/',
-        r'\\cdot': '·',
-        r'\\times': '×',
-        r'\\pm': '±',
-        r'\\leq': '≤',
-        r'\\geq': '≥',
-        r'\\neq': '≠',
-        r'\\approx': '≈',
-        r'\\sqrt': '√',
-        r'\\circ': '°',
-        r'\\infty': '∞',
-        r'\\mathrm': '',
-        r'\\mathbf': '',
-    }
-    
-    lines = code.splitlines()
-    result_lines = []
-    
-    for line in lines:
-        if 'Text(' in line and '\\\\' in line:
-            text_pattern = re.compile(r"(Text\s*\(\s*')((?:[^'\\]|\\.)*)(')")
-            
-            def text_replacer(m):
-                prefix = m.group(1)
-                content = m.group(2)
-                suffix = m.group(3)
-                
-                original_content = content
-                modified = False
-                
-                for latex, uni in latex_to_unicode.items():
-                    if latex + '{' in content:
-                        brace_pat = re.compile(re.escape(latex) + r'\{([^}]*)\}')
-                        content = brace_pat.sub(r'\1', content)
-                        modified = True
-                    elif latex in content:
-                        content = content.replace(latex, uni)
-                        modified = True
-                
-                content = re.sub(r'\{([^}]*)\}', r'\1', content)
-                
-                if modified:
-                    fixes.append(
-                        f"AUTO-FIX: Replaced LaTeX symbols with unicode in Text('{original_content[:40]}...')"
-                    )
-                
-                return prefix + content + suffix
-            
-            line = text_pattern.sub(text_replacer, line)
-        
-        result_lines.append(line)
-    
-    return '\n'.join(result_lines)
-
-
-def _fix_thai_in_mathrm(code: str, fixes: list[str]) -> str:
-    """Auto-fix \\mathrm{ภาษาไทย} by removing Thai chars."""
-    thai_range = re.compile(r'[\u0E00-\u0E7F]')
-    mathrm_with_thai = re.compile(r'\\\\?mathrm\{([^}]*[\u0E00-\u0E7F][^}]*)\}')
-    
-    def replacer(m):
-        content = m.group(1)
-        ascii_content = ''.join(c for c in content if ord(c) < 128)
-        if ascii_content.strip():
-            fixes.append(f"AUTO-FIX: \\mathrm{{{content[:20]}}} - removed Thai chars, kept ASCII")
-            return f'\\\\mathrm{{{ascii_content}}}'
-        else:
-            fixes.append(f"AUTO-FIX: \\mathrm{{{content[:20]}}} - all Thai, removed \\mathrm wrapper")
-            return content
-    
-    return mathrm_with_thai.sub(replacer, code)
-
-
-def _fix_step_title_latex(code: str, fixes: list[str]) -> str:
-    """Fix LaTeX symbols in Text() step titles."""
-    double_bs_symbols = {
-        r'(\\\\lambda)': 'λ',
-        r'(\\\\phi)': 'φ',
-        r'(\\\\phi_': 'φ_',
-        r'(\\\\theta)': 'θ',
-        r'(\\\\alpha)': 'α',
-        r'(\\\\beta)': 'β',
-        r'(\\\\gamma)': 'γ',
-        r'(\\\\delta)': 'δ',
-        r'(\\\\Delta)': 'Δ',
-        r'(\\\\pi)': 'π',
-        r'(\\\\omega)': 'ω',
-        r'(\\\\mu)': 'μ',
-        r'(\\\\sigma)': 'σ',
-        r'(\\\\nu)': 'ν',
-    }
-    
-    lines = code.splitlines()
-    result_lines = []
-    
-    for line in lines:
-        if 'Text(' in line:
-            for pattern, replacement in double_bs_symbols.items():
-                if '\\\\' in line and pattern.replace('(', '').replace(')', '') in line:
-                    def make_replacer(rep):
-                        def replacer(m):
-                            inner = m.group(0)
-                            pat = pattern.replace('(', r'\(').replace(')', r'\)')
-                            new_inner = re.sub(pat, rep, inner)
-                            if new_inner != inner:
-                                fixes.append(f"AUTO-FIX: Replaced {pattern} with {rep} in Text()")
-                            return new_inner
-                        return replacer
-                    
-                    text_pattern = re.compile(r"Text\s*\('[^']*'")
-                    line = text_pattern.sub(make_replacer(replacement), line)
-        
-        result_lines.append(line)
-    
-    return '\n'.join(result_lines)
-
-
-def _fix_latex_escape_in_text(code: str, fixes: list[str]) -> str:
-    """Remove LaTeX \\( \\) from Text() calls as last resort."""
-    pattern = re.compile(r'\\\\?\(\\\\?([a-zA-Z]+)\\\\?\)')
-    def replacer(m):
-        name = m.group(1)
-        fixes.append(f"AUTO-FIX: Removed LaTeX \\({name}\\) from Text() call")
-        return f'({name})'
-    return pattern.sub(replacer, code)
-
-
-def _fix_move_to_scalar(code: str, fixes: list[str]) -> str:
-    """Auto-fix .move_to(scalar_var) → .move_to(np.array([0, scalar_var, 0]))."""
-    zone_vars = [
-        'bottom_zone_center_y', 'middle_zone_center_y', 'top_zone_center_y',
-        'bottom_zone_bottom', 'bottom_zone_top',
-        'middle_zone_bottom', 'middle_zone_top',
-        'top_zone_bottom', 'top_zone_top',
-    ]
-    
-    for var in zone_vars:
-        pattern = re.compile(rf'\.move_to\(\s*{re.escape(var)}\s*\)')
-        if pattern.search(code):
-            fixes.append(f"AUTO-FIX: .move_to({var}) → .move_to(np.array([0, {var}, 0]))")
-            code = pattern.sub(f'.move_to(np.array([0, {var}, 0]))', code)
-    
-    return code
-
-
-def _fix_axes_too_large(code: str, fixes: list[str]) -> str:
-    """Clamp x_length/y_length on Axes(...) calls to safe limits (5.4 / 4.3)."""
-    def x_replacer(m):
-        val = float(m.group(1))
-        if val > 5.4:
-            fixes.append(f"AUTO-FIX: x_length={val} > 5.4 → clamped to 5.4")
-            return "x_length=5.4"
-        return m.group(0)
-
-    def y_replacer(m):
-        val = float(m.group(1))
-        if val > 4.3:
-            fixes.append(f"AUTO-FIX: y_length={val} > 4.3 → clamped to 4.3")
-            return "y_length=4.3"
-        return m.group(0)
-
-    code = re.sub(r'x_length\s*=\s*([0-9.]+)', x_replacer, code)
-    code = re.sub(r'y_length\s*=\s*([0-9.]+)', y_replacer, code)
-    return code
-
-
-def _fix_font_size_too_large(code: str, fixes: list[str]) -> str:
-    """
-    Clamp font_size on Text() to MAX_TEXT_FONT_SIZE, and MathTex() to
-    MAX_MATHTEX_FONT_SIZE (perfect size for mobile vertical video).
-
-    Uses the module-level MAX_TEXT_FONT_SIZE / MAX_MATHTEX_FONT_SIZE
-    constants so this fixer and `_detect_font_size_violations` below can
-    never contradict each other again (previously the fixer clamped
-    MathTex to 20 while a detector separately flagged anything over 28,
-    and a second, unused detector flagged anything over 30).
-    """
-
-    # 1. Clamp MathTex (Matches the highlighted text size in your Q17 example)
-    def math_replacer(m):
-        size = int(m.group(2))
-        if size > MAX_MATHTEX_FONT_SIZE:
-            fixes.append(f"AUTO-FIX: MathTex font_size={size} > {MAX_MATHTEX_FONT_SIZE} → clamped to {MAX_MATHTEX_FONT_SIZE}")
-            return f"{m.group(1)}{MAX_MATHTEX_FONT_SIZE}"
-        return m.group(0)
-    code = re.sub(r'(MathTex\s*\([^)]*?font_size\s*=\s*)([0-9]+)', math_replacer, code)
-
-    # 2. Clamp Text (Keeps Top Zone & Step titles readable)
-    def text_replacer(m):
-        size = int(m.group(2))
-        if size > MAX_TEXT_FONT_SIZE:
-            fixes.append(f"AUTO-FIX: Text font_size={size} > {MAX_TEXT_FONT_SIZE} → clamped to {MAX_TEXT_FONT_SIZE}")
-            return f"{m.group(1)}{MAX_TEXT_FONT_SIZE}"
-        return m.group(0)
-    code = re.sub(r'(Text\s*\([^)]*?font_size\s*=\s*)([0-9]+)', text_replacer, code)
-
-    return code
-
-
-def _fix_missing_numpy_import(code: str, fixes: list[str]) -> str:
-    """
-    Add `import numpy as np` if missing, at a syntactically valid insertion
-    point rather than blindly prepending it.
-
-    Blindly prepending 'import numpy as np\\n' can place the import before
-    a shebang, an encoding declaration, a module docstring, or a
-    `from __future__ import ...` line. The last case is a hard SyntaxError,
-    since future imports must appear at the very start of the module (only
-    a docstring/comments/blank lines may precede them). This version is
-    AST-aware: it parses the module, finds the module docstring (if any)
-    and any leading `__future__` imports, and inserts the numpy import
-    immediately after them, preserving a leading shebang/encoding line too.
-    """
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        # Can't safely determine an insertion point without a parse.
-        # Fall back to the old prepend behavior rather than doing nothing —
-        # the syntax-error detector below will flag the file either way,
-        # and the retry loop needs *some* code back.
-        if 'import numpy as np' not in '\n'.join(code.splitlines()[:10]):
-            fixes.append("AUTO-FIX: Added 'import numpy as np' at top of file (unparsable source, best-effort placement)")
-            return 'import numpy as np\n' + code
-        return code
-
-    already_imported = any(
-        isinstance(node, ast.Import)
-        and any(alias.name == "numpy" and alias.asname == "np" for alias in node.names)
-        for node in tree.body
-    )
-    if already_imported:
-        return code
-
-    lines = code.splitlines(keepends=True)
-    if not lines:
-        fixes.append("AUTO-FIX: Added 'import numpy as np' at top of file")
-        return 'import numpy as np\n'
-
-    insert_at = 0
-
-    # Keep a shebang and an encoding declaration at the very top.
-    if lines[0].startswith('#!'):
-        insert_at = 1
-    if insert_at < len(lines) and 'coding' in lines[insert_at] and lines[insert_at].lstrip().startswith('#'):
-        insert_at += 1
-
-    # Skip any leading blank/comment lines before the docstring.
-    while insert_at < len(lines):
-        stripped = lines[insert_at].strip()
-        if not stripped or stripped.startswith('#'):
-            insert_at += 1
-        else:
-            break
-
-    # If the module starts with a docstring, insert after it.
-    if (
-        tree.body
-        and isinstance(tree.body[0], ast.Expr)
-        and isinstance(getattr(tree.body[0], "value", None), ast.Constant)
-        and isinstance(tree.body[0].value.value, str)
-    ):
-        doc_end = tree.body[0].end_lineno
-        if doc_end is not None:
-            insert_at = max(insert_at, doc_end)
-
-    # Keep any `from __future__ import ...` lines ahead of the new import —
-    # they are required to be the first statements in the module.
-    while insert_at < len(lines) and lines[insert_at].strip().startswith('from __future__ import'):
-        insert_at += 1
-
-    lines.insert(insert_at, 'import numpy as np\n')
-    fixes.append("AUTO-FIX: Added 'import numpy as np' (inserted after docstring/__future__ imports, not blindly prepended)")
-    return ''.join(lines)
-
-
-def _fix_showcreation(code: str, fixes: list[str]) -> str:
-    """Auto-fix ShowCreation → Create. Token-aware: won't touch comments/strings."""
-    new_code, count = _safe_identifier_replace(code, 'ShowCreation(', 'Create(')
-    if count:
-        fixes.append(f"AUTO-FIX: ShowCreation() → Create() ({count} occurrence(s))")
-    return new_code
-
-
-def _fix_get_graph(code: str, fixes: list[str]) -> str:
-    """Auto-fix axes.get_graph() → axes.plot(). Token-aware: won't touch comments/strings."""
-    new_code, count = _safe_identifier_replace(code, 'get_graph(', 'plot(')
-    if count:
-        fixes.append(f"AUTO-FIX: .get_graph() → .plot() ({count} occurrence(s))")
-    return new_code
-
-
-def _fix_double_quote_in_strings(code: str, fixes: list[str]) -> str:
-    """Fix Text("...") using double quotes → Text('...')."""
-    pattern = re.compile(r'((?:Text|MathTex|Tex)\s*\()"([^"]*)"')
-    
-    def replacer(m):
-        if "'" in m.group(2):
-            return m.group(0)
-        fixes.append(f"AUTO-FIX: Double-quoted string in {m.group(1)} → single quotes")
-        return f"{m.group(1)}'{m.group(2)}'"
-    
-    return pattern.sub(replacer, code)
-
-
-def _fix_arrange_right_long_thai(code: str, fixes: list[str]) -> str:
-    """Auto-fix .arrange(RIGHT) with long Thai Text to .arrange(DOWN)."""
-    thai_long = re.compile(r'[\u0E00-\u0E7F]{15,}')
-    
-    lines = code.splitlines()
-    result_lines = list(lines)
-    
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        
-        if '.arrange(RIGHT' in line or '.arrange( RIGHT' in line:
-            has_long_thai = False
-            for back in range(i, max(i - 20, 0), -1):
-                if thai_long.search(lines[back]) and 'Text(' in lines[back]:
-                    has_long_thai = True
-                    break
-                if 'VGroup(' in lines[back]:
-                    break
-            
-            if has_long_thai:
-                new_line = re.sub(
-                    r'\.arrange\s*\(\s*RIGHT\s*(?:,\s*buff\s*=\s*[\d.]+)?\s*\)',
-                    '.arrange(DOWN, aligned_edge=LEFT, buff=0.15)',
-                    line
-                )
-                if new_line != line:
-                    result_lines[i] = new_line
-                    fixes.append(
-                        f"AUTO-FIX: Line {i+1}: .arrange(RIGHT) with long Thai Text → "
-                        f".arrange(DOWN, aligned_edge=LEFT) to prevent overflow"
-                    )
-        i += 1
-    
-    return '\n'.join(result_lines)
-
-
-def _fix_tex_mobject(code: str, fixes: list[str]) -> str:
-    """Auto-fix deprecated TexMobject/TextMobject → MathTex/Text. Token-aware."""
-    code, count = _safe_identifier_replace(code, 'TexMobject(', 'MathTex(')
-    if count:
-        fixes.append(f"AUTO-FIX: TexMobject() → MathTex() ({count} occurrence(s))")
-    code, count = _safe_identifier_replace(code, 'TextMobject(', 'Text(')
-    if count:
-        fixes.append(f"AUTO-FIX: TextMobject() → Text() ({count} occurrence(s))")
-    return code
-
-
-def _fix_indicate_flash(code: str, fixes: list[str]) -> str:
-    """Remove forbidden animations that crash Manim. Token-aware: won't touch comments/strings."""
-    replacements = [
-        ('Indicate(', 'FadeIn('),
-        ('Flash(', 'GrowFromCenter('),
-        ('ApplyWave(', 'FadeIn('),
-    ]
-    for old, new in replacements:
-        code, count = _safe_identifier_replace(code, old, new)
-        if count:
-            fixes.append(f"AUTO-FIX: {old} → {new} (forbidden animation, {count} occurrence(s))")
-    return code
-
-
-def _fix_font_in_mathtex(code: str, fixes: list[str]) -> str:
-    """Remove font= parameter from MathTex/Tex calls."""
-    pattern = re.compile(r"((?:MathTex|Tex)\s*\([^)]*),\s*font\s*=\s*'[^']*'([^)]*\))")
-    if pattern.search(code):
-        fixes.append("AUTO-FIX: Removed font= parameter from MathTex/Tex (not supported)")
-        code = pattern.sub(r'\1\2', code)
-    return code
-
-
-def _fix_mathrm_curly_braces(code: str, fixes: list[str]) -> str:
-    """Fix \\mathrm{} with no content."""
-    if r'\\mathrm{}' in code:
-        fixes.append("AUTO-FIX: Removed empty \\mathrm{}")
-        code = code.replace(r'\\mathrm{}', '')
-    return code
-
-
-def _fix_enforce_zone_clamping(code: str, fixes: list[str]) -> str:
-    """
-    Deterministically guarantee scale_to_fit_width/height before every
-    .move_to(top_center / middle_center / bottom_center), regardless of
-    whether Gemini remembered to add clamping itself.
-    """
-    zone_configs = {
-        'top_center': ('frame_width * 0.88', 'top_zone_height * 0.88'),
-        'middle_center': ('frame_width * 0.88', 'middle_zone_height * 0.82'),
-        'bottom_center': ('frame_width * 0.88', 'bottom_zone_height * 0.88'),
-    }
-    lines = code.splitlines()
-    out = []
-    move_to_pattern = re.compile(r'^(\s*)(\w+)\.move_to\((top_center|middle_center|bottom_center)\)\s*$')
-
-    for line in lines:
-        m = move_to_pattern.match(line)
-        if m:
-            indent, var, zone = m.groups()
-            w_expr, h_expr = zone_configs[zone]
-
-            # Scan back through everything already emitted to find THIS
-            # variable's assignment line, then only look for an existing
-            # scale_to_fit_width call between that assignment and here.
-            # This fixes two bugs from the fixed 6-line-window version:
-            #   (a) false negative: a legitimate double-clamp block (scale
-            #       width, scale height, min-width check, min-height check)
-            #       can run 6-8+ lines and fall outside a fixed window,
-            #       causing a redundant (harmless but wasteful) re-clamp.
-            #   (b) false positive: checking `f'{var}.scale_to_fit_width'
-            #       not in recent` as a plain substring means var='group'
-            #       incorrectly matches inside 'sub_group.scale_to_fit_width',
-            #       causing 'group' to be silently skipped and left
-            #       unclamped — the exact overflow bug this fixer exists
-            #       to prevent.
-            assign_pattern = re.compile(rf'(?<![\w.]){re.escape(var)}\s*=')
-            scan_start = 0
-            for idx in range(len(out) - 1, -1, -1):
-                if assign_pattern.search(out[idx]):
-                    scan_start = idx
-                    break
-
-            already_scaled_pattern = re.compile(
-                rf'(?<![\w.]){re.escape(var)}\.scale_to_fit_width\s*\('
-            )
-            recent = "\n".join(out[scan_start:])
-            already_scaled = bool(already_scaled_pattern.search(recent))
-
-            if not already_scaled:
-                out.append(f"{indent}if {var}.width > {w_expr}:")
-                out.append(f"{indent}    {var}.scale_to_fit_width({w_expr})")
-                out.append(f"{indent}if {var}.height > {h_expr}:")
-                out.append(f"{indent}    {var}.scale_to_fit_height({h_expr})")
-                fixes.append(f"AUTO-FIX: Force-clamped '{var}' before .move_to({zone})")
-        out.append(line)
-    return '\n'.join(out)
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 2 helpers — violation detectors (things we CAN'T safely auto-fix)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _detect_latex_in_text(lines: list[str]) -> list[Violation]:
-    """Detect remaining LaTeX syntax in Text() after auto-fixes."""
-    violations = []
-    latex_in_text = re.compile(
-        r'Text\s*\([^)]*(?:'
-        r'\\\\(?:frac|sqrt|sum|int|prod|lim|partial)'
-        r'|\\\\[\(\[\\]'
-        r')[^)]*\)'
-    )
-    for i, line in enumerate(lines, 1):
-        if 'Text(' in line and latex_in_text.search(line):
-            violations.append(Violation(
-                rule="LATEX_IN_TEXT",
-                line=i,
-                snippet=line.strip()[:80],
-                description=(
-                    "พบ LaTeX syntax ซับซ้อน (\\frac, \\sqrt ฯลฯ) ใน Text() — "
-                    "ต้องแยกเป็น VGroup(Text('...'), MathTex(r'...')) แทน"
-                )
-            ))
-    return violations
-
-
-def _detect_thai_in_mathtex(lines: list[str]) -> list[Violation]:
-    """Detect Thai characters inside MathTex() or Tex() calls."""
-    violations = []
-    thai_range = re.compile(r'[\u0E00-\u0E7F]')
-    mathtex_pattern = re.compile(r'(MathTex|Tex)\s*\(')
-    for i, line in enumerate(lines, 1):
-        if mathtex_pattern.search(line) and thai_range.search(line):
-            code_part = line.split('#')[0]
-            if mathtex_pattern.search(code_part) and thai_range.search(code_part):
-                violations.append(Violation(
-                    rule="THAI_IN_MATHTEX",
-                    line=i,
-                    snippet=line.strip()[:80],
-                    description=(
-                        "พบตัวอักษรภาษาไทยใน MathTex()/Tex() — "
-                        "ต้องแยกข้อความไทยออกเป็น Text() แล้วใช้ VGroup จัดวาง"
-                    )
-                ))
-    return violations
-
-
-def _detect_thai_in_mathrm(lines: list[str]) -> list[Violation]:
-    """Detect Thai characters inside \\mathrm{...} after auto-fix."""
-    violations = []
-    thai_range = re.compile(r'[\u0E00-\u0E7F]')
-    mathrm_pattern = re.compile(r'\\\\?mathrm\{([^}]*)\}')
-    for i, line in enumerate(lines, 1):
-        for m in mathrm_pattern.finditer(line):
-            if thai_range.search(m.group(1)):
-                violations.append(Violation(
-                    rule="THAI_IN_MATHRM",
-                    line=i,
-                    snippet=line.strip()[:80],
-                    description=(
-                        f"พบภาษาไทยใน \\mathrm{{{m.group(1)[:20]}}} — "
-                        "ต้องแยกออกเป็น Text()"
-                    )
-                ))
-    return violations
-
-
-def _detect_overlapping_labels(lines: list[str]) -> list[Violation]:
-    violations = []
-    placement_map: dict[str, list[int]] = {}
-    next_to_pattern = re.compile(
-        r'\.next_to\(\s*(\w+)\s*,\s*(UR|UL|DR|DL|UP|DOWN|LEFT|RIGHT)\s*'
-    )
-    for i, line in enumerate(lines, 1):
-        for m in next_to_pattern.finditer(line):
-            ref, direction = m.group(1), m.group(2)
-            key = f"{ref}_{direction}"
-            placement_map.setdefault(key, []).append(i)
-    for key, line_nums in placement_map.items():
-        if len(line_nums) >= 3:
-            ref, direction = key.rsplit('_', 1)
-            violations.append(Violation(
-                rule="OVERLAPPING_LABELS",
-                line=line_nums[0],
-                snippet=f"บรรทัด {line_nums}: .next_to({ref}, {direction}, ...)",
-                description=(
-                    f"มี {len(line_nums)} labels ที่ .next_to({ref}, {direction}) "
-                    f"ทิศเดียวกัน — จะทับซ้อนกัน ต้องกระจายทิศทาง"
-                )
-            ))
-    return violations
-
-
-def _detect_axes_too_large(lines: list[str]) -> list[Violation]:
-    violations = []
-    for i, line in enumerate(lines, 1):
-        m = re.search(r'x_length\s*=\s*([0-9.]+)', line)
-        if m:
-            try:
-                val = float(m.group(1))
-                if val > 5.4:
-                    violations.append(Violation(
-                        rule="AXES_TOO_LARGE",
-                        line=i,
-                        snippet=line.strip()[:80],
-                        description=f"x_length={val} เกิน 5.4 — ควรใช้ frame_width * 0.60 (หรือ 5.4)"
-                    ))
-            except ValueError:
-                pass
-        m = re.search(r'y_length\s*=\s*([0-9.]+)', line)
-        if m:
-            try:
-                val = float(m.group(1))
-                if val > 4.3:
-                    violations.append(Violation(
-                        rule="AXES_TOO_LARGE",
-                        line=i,
-                        snippet=line.strip()[:80],
-                        description=f"y_length={val} เกิน 4.3 — ควรใช้ middle_zone_height * 0.65 (หรือ 4.3)"
-                    ))
-            except ValueError:
-                pass
-    return violations
-
-
-def _detect_missing_numpy_import(lines: list[str]) -> list[Violation]:
-    first_lines = '\n'.join(lines[:10])
-    if 'import numpy as np' not in first_lines:
-        return [Violation(
-            rule="MISSING_NUMPY",
-            line=1,
-            snippet=lines[0].strip() if lines else '',
-            description="ไม่มี 'import numpy as np' — จะเกิด NameError: name 'np' is not defined"
-        )]
-    return []
-
-
-def _detect_move_to_scalar(lines: list[str]) -> list[Violation]:
-    violations = []
-    scalar_pattern = re.compile(
-        r'\.move_to\(\s*(?!np\.array|ORIGIN|UP|DOWN|LEFT|RIGHT|UR|UL|DR|DL)'
-        r'([a-z_]+(?:_y|_bottom|_top|_center_y))\s*\)'
-    )
-    for i, line in enumerate(lines, 1):
-        m = scalar_pattern.search(line)
-        if m:
-            varname = m.group(1)
-            violations.append(Violation(
-                rule="MOVE_TO_SCALAR",
-                line=i,
-                snippet=line.strip()[:80],
-                description=f".move_to({varname}) ส่ง scalar → ต้องเป็น np.array([0, {varname}, 0])"
-            ))
-    return violations
-
-
-def _detect_final_answer_arrange_right(lines: list[str]) -> list[Violation]:
-    """Detect .arrange(RIGHT) with long Thai Text as direct member."""
-    violations = []
-    thai_long = re.compile(r'[\u0E00-\u0E7F]{15,}')
-    arrange_right_pat = re.compile(r'\.arrange\(\s*RIGHT')
-
-    for i, line in enumerate(lines, 1):
-        if not arrange_right_pat.search(line):
-            continue
-
-        vgroup_block_lines = []
-        if 'VGroup(' in line:
-            vgroup_block_lines = [line]
-        else:
-            depth = 0
-            found_open = False
-            for back in range(i - 1, max(i - 12, 0), -1):
-                back_line = lines[back]
-                depth += back_line.count(')') - back_line.count('(')
-                vgroup_block_lines.insert(0, back_line)
-                if 'VGroup(' in back_line and depth >= 0:
-                    found_open = True
-                    break
-            if not found_open:
-                continue
-
-        vgroup_text = '\n'.join(vgroup_block_lines)
-        vgroup_args_pat = re.compile(r'VGroup\s*\(([^)]+)\)', re.DOTALL)
-        args_match = vgroup_args_pat.search(vgroup_text)
-        if not args_match:
-            continue
-
-        arg_names = re.findall(r'\b([a-zA-Z_]\w*)\b', args_match.group(1))
-        found_long_thai_text = False
-
-        for arg_name in arg_names:
-            for back in range(i - 1, max(i - 22, 0), -1):
-                def_line = lines[back]
-                if not re.match(rf'\s*{re.escape(arg_name)}\s*=', def_line):
-                    continue
-                if 'Text(' not in def_line or 'MathTex(' in def_line:
-                    break
-                if thai_long.search(def_line):
-                    found_long_thai_text = True
-                    break
-                break
-
-            if found_long_thai_text:
-                break
-
-        if found_long_thai_text:
-            violations.append(Violation(
-                rule="ANSWER_ARRANGE_RIGHT_OVERFLOW",
-                line=i,
-                snippet=line.strip()[:80],
-                description=(
-                    "พบ .arrange(RIGHT) ที่มี Text ไทยยาว (15+ ตัว) — "
-                    "ต้องเปลี่ยนเป็น .arrange(DOWN, aligned_edge=LEFT)"
-                )
-            ))
-    return violations
-
-
-def _detect_vgroup_list_comprehension(lines: list[str]) -> list[Violation]:
-    """Detect any remaining VGroup(*[...]) patterns after auto-fix."""
-    violations = []
-    pattern = re.compile(r'VGroup\s*\(\s*\*\s*\[')
-    for i, line in enumerate(lines, 1):
-        if pattern.search(line):
-            violations.append(Violation(
-                rule="VGROUP_LIST_COMPREHENSION",
-                line=i,
-                snippet=line.strip()[:80],
-                description=(
-                    "พบ VGroup(*[...]) — เสี่ยงวงเล็บไม่สมดุล "
-                    "ต้องเขียน Text() แยกบรรทัดเป็น argument ตรงๆ ของ VGroup()"
-                )
-            ))
-    return violations
-
-
-def _detect_unbalanced_latex_braces(lines: list[str]) -> list[Violation]:
-    violations = []
-    pattern = re.compile(r'(?:MathTex|Tex)\s*\(\s*r[\'"]([^\'"]*)[\'"]')
-    for i, line in enumerate(lines, 1):
-        for m in pattern.finditer(line):
-            latex_content = m.group(1)
-            opens = latex_content.count('{')
-            closes = latex_content.count('}')
-            if opens != closes:
-                violations.append(Violation(
-                    rule="UNBALANCED_LATEX_BRACES",
-                    line=i,
-                    snippet=line.strip()[:80],
-                    description=(
-                        f"วงเล็บปีกกา LaTeX ไม่สมดุล: {opens} เปิด แต่ {closes} ปิด — "
-                        "ตรวจนับและแก้ให้สมดุล"
-                    )
-                ))
-    return violations
-
-
-def _detect_math_errors(lines: list[str]) -> list[Violation]:
-    """
-    Detect common mathematical errors in equations.
-
-    NOTE: the old MATH_BACKSLASH_MISSING checks that lived here have been
-    REMOVED. They checked `r'\\frac' in content and r'\\\\frac' not in
-    content`, which is backwards: a CORRECTLY single-escaped raw string
-    (content == '\\frac{1}{2}', exactly one backslash) always satisfies
-    this condition too, because the single-backslash substring '\\frac' is
-    trivially found inside itself. So this rule flagged correct code as
-    broken and told Gemini (via its own description text, which said
-    '\\\\frac' i.e. double-backslash) to add a SECOND backslash -- which is
-    exactly what produces the garbled "mathrm{m/s}"-style text bug. The
-    real fix for over-escaping is the deterministic `_fix_over_escaped_latex`
-    auto-fixer (Phase 1), which runs before this detector and needs no LLM
-    call at all.
-    """
-    violations = []
-
-    for i, line in enumerate(lines, 1):
-        # Check for \equiv used incorrectly
-        if r'\equiv' in line and 'MathTex' in line:
-            violations.append(Violation(
-                rule="MATH_EQUIV_INCORRECT",
-                line=i,
-                snippet=line.strip()[:80],
-                description=(
-                    "พบ \\equiv ในสมการ — ควรใช้ = แทน \\equiv "
-                    "(\\equiv ใช้สำหรับเอกลักษณ์/นิยามเท่านั้น)"
-                )
-            ))
-
-        # Check for wrong final velocity calculation. Look at a forward
-        # window of lines (not just this one) since the correct final
-        # answer is often written on a LATER MathTex/variable, e.g.:
-        #   eq4 = MathTex(r'v = \sqrt{200^2 + 200^2}', ...)
-        #   eq5 = MathTex(r'v = 200\sqrt{2}\,\mathrm{m/s}', ...)
-        # Checking only `line` for '200\sqrt{2}' incorrectly flags eq4 even
-        # though eq5 (a few lines later) already has the correct answer.
-        if 'sqrt{200^2 + 200^2}' in line and '200^2' in line and 'MathTex' in line:
-            window = "\n".join(lines[i - 1:min(i + 5, len(lines))])
-            if '200\\sqrt{2}' not in window and '200\\\\sqrt{2}' not in window:
-                violations.append(Violation(
-                    rule="MATH_SQRT_WRONG",
-                    line=i,
-                    snippet=line.strip()[:80],
-                    description=(
-                        "พบ sqrt(200² + 200²) แต่ไม่พบคำตอบ 200√2 ในสมการถัดไป — "
-                        "ต้องเป็น sqrt(200² + 200²) = 200√2"
-                    )
-                ))
-
-    return violations
-
-
-class _Scope:
-    """One lexical scope: module, function/lambda, class, or comprehension."""
-    __slots__ = ("kind", "parent", "assigned_at")
-
-    def __init__(self, kind: str, parent: "_Scope | None"):
-        self.kind = kind
-        self.parent = parent
-        self.assigned_at: dict[str, int] = {}
-
-
-def _detect_undefined_variables(code: str) -> list[Violation]:
-    """
-    Catch NameError-causing bugs *before* Manim render: variables that are
-    used (e.g. inside a VGroup(...) call) but never assigned anywhere that
-    could actually reach that use, or used before their first assignment
-    in the *same* scope.
-
-    This exists mainly as a safety net for auto-fix/line-patch bugs that can
-    silently drop a variable's definition line (e.g. a targeted Gemini patch
-    that only echoes back the line it was asked to fix, dropping a sibling
-    definition that happened to sit in the same context window). Catching it
-    here means the pipeline gets another retry instead of a hard render crash.
-
-    SCOPE-AWARE (previous version was not): assignments are tracked
-    per-scope with proper Python lexical scoping (module / function /
-    comprehension scopes; class bodies are NOT an enclosing scope for
-    nested methods, matching real Python semantics). This fixes two
-    opposite bugs the flat, single-dict version had:
-      - false negative: `value = 1` inside one function made `value` look
-        "defined" for an unrelated `print(value)` inside a completely
-        different function.
-      - false positive risk: a name assigned only inside some other
-        function could mask a genuinely undefined name of the same
-        spelling used at module level, or vice versa.
-    Name resolution follows LEGB (skipping class scopes when climbing up,
-    since a method cannot see its class body's names as an enclosing
-    scope). A name resolved in the *same* scope where it's used is still
-    checked for "used before its first assignment on an earlier line"
-    (this matters most for the typical single straight-line
-    `construct(self)` method these scripts are generated as). A name that
-    only resolves in an *enclosing* scope is never flagged for ordering,
-    since a nested function's body runs after the enclosing scope has
-    already executed up to that point — flagging that would produce false
-    positives on ordinary, valid closures.
-
-    Deliberately conservative to avoid false positives:
-      - Only checks bare lowercase/snake_case identifiers (regex
-        ^[a-z_][a-z0-9_]*$). Manim/numpy library symbols are virtually always
-        PascalCase (Text, VGroup, MathTex, Circle) or ALL_CAPS (UP, BLUE_D,
-        ORIGIN), so this naturally excludes them without needing a full
-        manim symbol table.
-      - Whitelists Python builtins, any imported names, and a short list of
-        known lowercase manim/numpy globals (self, config, np, and common
-        rate functions) that are legitimately used without local assignment.
-      - `x += 1` now correctly counts as reading `x` (on the same line, at
-        the point evaluation happens) in addition to writing it — the
-        previous version only recorded it as a write, so `x += 1` with no
-        prior `x = ...` anywhere was silently treated as fine.
-      - Only reports each offending name once file-wide, for the first
-        genuinely undefined/used-too-early occurrence.
-    """
-    violations: list[Violation] = []
-
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return violations  # syntax errors are already caught elsewhere
-
-    known_globals = {
-        "self", "cls", "config", "np",
-        # common lowercase manim rate-functions / helpers pulled in via
-        # `from manim import *` that are never locally assigned
-        "smooth", "linear", "there_and_back", "there_and_back_with_pause",
-        "running_start", "not_quite_there", "wiggle", "squish_rate_func",
-        "lingering", "exponential_decay", "double_smooth", "rush_into",
-        "rush_from", "slow_into", "always_redraw", "always_shift",
-        "always_rotate", "always_scale", "turn_animation_into_updater",
-        "interpolate", "rate_functions",
-    }
-
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                imported.add(alias.asname or alias.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                if alias.name != "*":
-                    imported.add(alias.asname or alias.name)
-
-    whitelist = set(dir(_builtins_module)) | imported | known_globals
-    name_pattern = re.compile(r"^[a-z_][a-z0-9_]*$")
-
-    module_scope = _Scope("module", None)
-    scope_of: dict[int, _Scope] = {}  # id(node) -> Scope, for scope-owning nodes
-
-    def record(scope: _Scope, name: str, lineno: int) -> None:
-        if name not in scope.assigned_at or lineno < scope.assigned_at[name]:
-            scope.assigned_at[name] = lineno
-
-    def record_targets(scope: _Scope, target: ast.AST, lineno: int) -> None:
-        for n in ast.walk(target):
-            if isinstance(n, ast.Name):
-                record(scope, n.id, lineno)
-
-    def all_params(args: ast.arguments):
-        return list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)
-
-    # ── Pass 1: build the scope tree and collect every assignment per scope
-    def build(node: ast.AST, scope: _Scope) -> None:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            record(scope, node.name, node.lineno)
-            new_scope = _Scope("function", scope)
-            scope_of[id(node)] = new_scope
-            args = node.args
-            for a in all_params(args):
-                record(new_scope, a.arg, node.lineno)
-            if args.vararg:
-                record(new_scope, args.vararg.arg, node.lineno)
-            if args.kwarg:
-                record(new_scope, args.kwarg.arg, node.lineno)
-            for deco in node.decorator_list:
-                build(deco, scope)
-            for d in list(args.defaults) + [d for d in args.kw_defaults if d is not None]:
-                build(d, scope)
-            for stmt in node.body:
-                build(stmt, new_scope)
-            return
-
-        if isinstance(node, ast.Lambda):
-            new_scope = _Scope("function", scope)
-            scope_of[id(node)] = new_scope
-            args = node.args
-            for a in all_params(args):
-                record(new_scope, a.arg, getattr(node, "lineno", 0))
-            if args.vararg:
-                record(new_scope, args.vararg.arg, getattr(node, "lineno", 0))
-            if args.kwarg:
-                record(new_scope, args.kwarg.arg, getattr(node, "lineno", 0))
-            build(node.body, new_scope)
-            return
-
-        if isinstance(node, ast.ClassDef):
-            record(scope, node.name, node.lineno)
-            new_scope = _Scope("class", scope)
-            scope_of[id(node)] = new_scope
-            for deco in node.decorator_list:
-                build(deco, scope)
-            for base in node.bases:
-                build(base, scope)
-            for stmt in node.body:
-                build(stmt, new_scope)
-            return
-
-        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-            new_scope = _Scope("comprehension", scope)
-            scope_of[id(node)] = new_scope
-            for gen in node.generators:
-                record_targets(new_scope, gen.target, getattr(node, "lineno", 0))
-                for cond in gen.ifs:
-                    build(cond, new_scope)
-            if isinstance(node, ast.DictComp):
-                build(node.key, new_scope)
-                build(node.value, new_scope)
-            else:
-                build(node.elt, new_scope)
-            return
-
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                record_targets(scope, t, node.lineno)
-        elif isinstance(node, ast.AugAssign):
-            record_targets(scope, node.target, node.lineno)
-        elif isinstance(node, ast.AnnAssign) and node.target is not None:
-            record_targets(scope, node.target, node.lineno)
-        elif isinstance(node, ast.For):
-            record_targets(scope, node.target, node.lineno)
-        elif isinstance(node, ast.With):
-            for item in node.items:
-                if item.optional_vars:
-                    record_targets(scope, item.optional_vars, node.lineno)
-
-        for child in ast.iter_child_nodes(node):
-            build(child, scope)
-
-    build(tree, module_scope)
-
-    # ── Pass 2: collect every Name *use* (Load), tagged with the scope it
-    # occurs in, including the implicit read inside `x += 1`.
-    uses: list[tuple[str, int, _Scope]] = []
-
-    def collect_uses(node: ast.AST, scope: _Scope) -> None:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            new_scope = scope_of[id(node)]
-            for deco in node.decorator_list:
-                collect_uses(deco, scope)
-            args = node.args
-            for d in list(args.defaults) + [d for d in args.kw_defaults if d is not None]:
-                collect_uses(d, scope)
-            for stmt in node.body:
-                collect_uses(stmt, new_scope)
-            return
-
-        if isinstance(node, ast.Lambda):
-            collect_uses(node.body, scope_of[id(node)])
-            return
-
-        if isinstance(node, ast.ClassDef):
-            new_scope = scope_of[id(node)]
-            for deco in node.decorator_list:
-                collect_uses(deco, scope)
-            for base in node.bases:
-                collect_uses(base, scope)
-            for stmt in node.body:
-                collect_uses(stmt, new_scope)
-            return
-
-        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-            new_scope = scope_of[id(node)]
-            for gen in node.generators:
-                collect_uses(gen.iter, scope)
-                for cond in gen.ifs:
-                    collect_uses(cond, new_scope)
-            if isinstance(node, ast.DictComp):
-                collect_uses(node.key, new_scope)
-                collect_uses(node.value, new_scope)
-            else:
-                collect_uses(node.elt, new_scope)
-            return
-
-        if isinstance(node, ast.AugAssign):
-            # `x += 1` reads x before it (re)writes it — the previous
-            # version missed this and treated it as pure assignment.
-            for n in ast.walk(node.target):
-                if isinstance(n, ast.Name):
-                    uses.append((n.id, node.lineno, scope))
-            collect_uses(node.value, scope)
-            return
-
-        if isinstance(node, ast.Name):
-            if isinstance(node.ctx, ast.Load):
-                uses.append((node.id, node.lineno, scope))
-            return
-
-        for child in ast.iter_child_nodes(node):
-            collect_uses(child, scope)
-
-    collect_uses(tree, module_scope)
-
-    # ── Resolve each use against the scope chain (LEGB, skipping class
-    # scopes when climbing, matching real Python closure rules).
-    def resolve(scope: _Scope, name: str):
-        if name in scope.assigned_at:
-            return scope, scope.assigned_at[name]
-        s = scope.parent
-        while s is not None:
-            if s.kind != "class" and name in s.assigned_at:
-                return s, s.assigned_at[name]
-            s = s.parent
-        return None, None
-
-    reported: set[str] = set()
-    for name, lineno, scope in uses:
-        if name in whitelist or not name_pattern.match(name) or name in reported:
-            continue
-        defining_scope, first_def = resolve(scope, name)
-        if defining_scope is None:
-            violations.append(Violation(
-                rule="UNDEFINED_VARIABLE",
-                line=lineno,
-                snippet=name,
-                description=(
-                    f"ตัวแปร '{name}' ถูกใช้งานแต่ไม่เคยถูกกำหนดค่าที่ไหนเลยในโค้ด "
-                    "(อาจถูกลบทิ้งโดยไม่ได้ตั้งใจระหว่างการแก้บั๊กอัตโนมัติ) "
-                    "จะทำให้เกิด NameError ตอนเรนเดอร์"
-                ),
-            ))
-            reported.add(name)
-        elif defining_scope is scope and first_def > lineno:
-            violations.append(Violation(
-                rule="UNDEFINED_VARIABLE",
-                line=lineno,
-                snippet=name,
-                description=(
-                    f"ตัวแปร '{name}' ถูกใช้งานที่บรรทัด {lineno} "
-                    f"ก่อนที่จะถูกกำหนดค่าครั้งแรกที่บรรทัด {first_def} — "
-                    "จะทำให้เกิด NameError ตอนเรนเดอร์"
-                ),
-            ))
-            reported.add(name)
-        # else: resolved cleanly in this scope before use, or resolved in
-        # an enclosing scope (a valid closure reference) — not flagged.
-
-    return violations
-
-
-def _detect_missing_scaling(lines: list[str]) -> list[Violation]:
-    """
-    Detect VGroups in bottom/middle zone without scaling.
-    Scans forward from the assignment line to ensure scaling happens before move_to.
-    """
-    violations = []
-    vgroup_assign_pattern = re.compile(r'^(\w+)\s*=\s*VGroup\(')
-    
-    for i, line in enumerate(lines):
-        m = vgroup_assign_pattern.search(line)
-        if not m:
-            continue
-        var_name = m.group(1)
-        if 'axes' in var_name.lower():
-            continue  # Axes groups are handled separately, don't double-flag
-
-        # Scan forward up to 25 lines
-        found_scale = False
-        found_move_to_zone = False
-        scan_end = min(i + 25, len(lines))
-
-        for j in range(i + 1, scan_end):
-            cur_line = lines[j]
-            
-            # Check if this variable gets scaled in this line
-            if re.search(rf'\b{re.escape(var_name)}\.scale_to_fit_(width|height)\s*\(', cur_line):
-                found_scale = True
-                break  # Found scaling, this group is safe, no violation.
-
-            # Check if this variable gets moved to bottom/middle center
-            if re.search(rf'\b{re.escape(var_name)}\.move_to\s*\(\s*(?:bottom_center|middle_center)\s*\)', cur_line):
-                found_move_to_zone = True
-                # If we find a move_to, but haven't found a scaling yet, we have a violation.
-                break 
-
-        if found_move_to_zone and not found_scale:
-            violations.append(Violation(
-                rule="MISSING_SCALING",
-                line=i + 1,
-                snippet=line.strip()[:80],
-                description=(
-                    f"พบ VGroup '{var_name}' เคลื่อนไปกลาง/ล่าง (move_to) "
-                    f"แต่ไม่พบการ .scale_to_fit_width() ก่อนหน้านั้น — "
-                    "อาจทำให้เนื้อหาล้นจอ แก้โดยเพิ่ม scaling"
-                )
-            ))
-    return violations
-
-
-def _detect_text_overflow(lines: list[str]) -> list[Violation]:
-    """
-    Heuristic detector: estimates text width based on char count and font_size.
-    Flags if estimated width exceeds frame_width * 0.88 (~7.9 pixels).
-    """
-    violations = []
-    text_pattern = re.compile(r'Text\s*\(\s*[\'"]([^\'"]*)[\'"]\s*,\s*font_size\s*=\s*(\d+)')
-    
-    for i, line in enumerate(lines):
-        for m in text_pattern.finditer(line):
-            text_content = m.group(1)
-            font_size = int(m.group(2))
-            # Rough pixel estimate for TH Sarabun New (approx 0.55x pixel width per char)
-            estimated_width = len(text_content) * font_size * 0.55
-            
-            if estimated_width > 7.9:  # frame_width * 0.88
-                # We don't check for scaling here because scaling happens on VGroups.
-                # This detector just warns the LLM to split the string or use a VGroup.
-                violations.append(Violation(
-                    rule="TEXT_OVERFLOW",
-                    line=i + 1,
-                    snippet=line.strip()[:80],
-                    description=(
-                        f"Text '{text_content[:20]}...' (len={len(text_content)}, font_size={font_size}) "
-                        f"คาดว่าจะยาวเกินกรอบจอ (~{estimated_width:.0f}px > 7.9) — "
-                        "ให้แบ่งเป็นหลายบรรทัดใน VGroup หรือห่อด้วย .scale_to_fit_width()"
-                    )
-                ))
-    return violations
-
-
-def _detect_font_size_violations(lines: list[str]) -> list[Violation]:
-    """
-    Detect font_size > 28 in Text()/MathTex().
-    """
-    violations = []
-    
-    for i, line in enumerate(lines, 1):
-        text_match = re.search(r'Text\([^)]*font_size\s*=\s*(\d+)', line)
-        if text_match:
-            size = int(text_match.group(1))
-            if size > MAX_TEXT_FONT_SIZE:
-                violations.append(Violation(
-                    rule="FONT_SIZE_TOO_LARGE",
-                    line=i,
-                    snippet=line.strip()[:80],
-                    description=f"font_size={size} ใน Text() — ต้อง ≤ {MAX_TEXT_FONT_SIZE}"
-                ))
-
-        math_match = re.search(r'MathTex\([^)]*font_size\s*=\s*(\d+)', line)
-        if math_match:
-            size = int(math_match.group(1))
-            if size > MAX_MATHTEX_FONT_SIZE:
-                violations.append(Violation(
-                    rule="FONT_SIZE_TOO_LARGE",
-                    line=i,
-                    snippet=line.strip()[:80],
-                    description=f"font_size={size} ใน MathTex() — ต้อง ≤ {MAX_MATHTEX_FONT_SIZE}"
-                ))
-    
-    return violations
-
-
-# In code_validator.py, replace the _detect_bottom_zone_empty function with:
-
-def _detect_bottom_zone_empty(lines: list[str]) -> list[Violation]:
-    """
-    Detect if bottom zone has no content.
-    Only flag if there are truly NO steps at all in the bottom zone.
-    """
-    violations = []
-    
-    # Check for bottom zone content by looking for VGroups moved to bottom_center
-    vgroup_assign_pattern = re.compile(r'(\w+)\s*=\s*VGroup\(')
-    
-    for i, line in enumerate(lines):
-        m = vgroup_assign_pattern.search(line)
-        if not m:
-            continue
-        var_name = m.group(1)
-        
-        # Skip axes-related VGroups
-        if 'axes' in var_name.lower() or 'vis' in var_name.lower() or 'viz' in var_name.lower():
-            continue
-            
-        # Check if this VGroup is moved to bottom_center
-        window = lines[max(0, i):min(i + 35, len(lines))]
-        window_text = "\n".join(window)
-        
-        if f'{var_name}.move_to(bottom_center)' in window_text:
-            # Found bottom zone content - this episode is fine
-            return []
-    
-    # If we get here, no bottom zone VGroup found
-    # But double-check: maybe the code uses direct placement without VGroup?
-    has_equations = False
-    for i, line in enumerate(lines):
-        if 'bottom_center' in line:
-            # Look backward for MathTex that might be in bottom zone
-            for back in range(max(0, i - 25), i):
-                if 'MathTex' in lines[back] and 'bottom' not in lines[back].lower():
-                    has_equations = True
-                    break
-            if has_equations:
-                break
-    
-    if not has_equations:
-        # One more check: any step_title or equation content?
-        for line in lines[:80]:
-            # Parenthesized: previously `'step_title' in line or 'eq' in
-            # line and 'MathTex' in line` relied on Python's `and`/`or`
-            # precedence, which parses as `A or (B and C)` — that already
-            # happens to be the intended grouping, but leaving it implicit
-            # makes the condition easy to misread and easy to break with a
-            # future edit. Made explicit here with no behavior change.
-            if 'step_title' in line or ('eq' in line and 'MathTex' in line):
-                return []  # Found equations, it's fine
-    
-    # Only flag if there's truly no content
-    has_content = False
-    for line in lines[:50]:
-        if 'Text(' in line or 'MathTex' in line or 'VGroup' in line:
-            has_content = True
-            break
-    
-    if has_content:
-        violations.append(Violation(
-            rule="BOTTOM_ZONE_EMPTY",
-            line=1,
-            snippet="construct() method",
-            description="ไม่พบเนื้อหาในโซนล่าง — ตรวจสอบว่ามี VGroup(...).move_to(bottom_center) หรือไม่"
-        ))
-    
-    return violations
-
-
-def _fix_aligned_edge_center(code: str, fixes: list[str]) -> str:
-    """Fix aligned_edge=CENTER which doesn't exist in Manim."""
-    pattern = re.compile(r'aligned_edge\s*=\s*CENTER')
-    if pattern.search(code):
-        fixes.append("AUTO-FIX: aligned_edge=CENTER → aligned_edge=LEFT (CENTER doesn't exist in Manim)")
-        code = pattern.sub('aligned_edge=LEFT', code)
-    return code
-
-
-def _detect_syntax_error(code: str) -> list[Violation]:
-    """
-    Explicit syntax-error check, run immediately after Phase 1 auto-fixes.
-
-    Previously a SyntaxError after auto-fixing was silently swallowed:
-    `_detect_undefined_variables` (and other AST-based checks) would hit
-    `except SyntaxError: return []` and simply report zero violations,
-    which reads as "this code is fine" even when it can't be parsed at
-    all — a false negative that would only surface later as a hard render
-    crash. This is especially important because some of the fixers above
-    are themselves capable of introducing a syntax error (e.g. an
-    indentation-sensitive rewrite landing in the wrong context). Surfacing
-    it here as an explicit, ranked-first violation means it gets a
-    Gemini retry with an exact line/message instead of a silent pass-through.
-    """
+def detect_syntax_error(code: str) -> list[Violation]:
     try:
         ast.parse(code)
     except SyntaxError as exc:
@@ -1688,116 +1448,475 @@ def _detect_syntax_error(code: str) -> list[Violation]:
             rule="SYNTAX_ERROR",
             line=line,
             snippet=(exc.text or "").strip()[:120],
-            description=f"Python syntax error: {exc.msg} (บรรทัด {line}) — โค้ดนี้ parse ไม่ผ่านเลย ต้องแก้ก่อนอย่างอื่นทั้งหมด",
+            description=f"{exc.msg} at line {line}",
         )]
     return []
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main public function
-# ─────────────────────────────────────────────────────────────────────────────
+def detect_undefined_variables(code: str) -> list[Violation]:
+    return [
+        Violation(rule="UNDEFINED_VARIABLE", line=lineno, snippet=name, description=desc)
+        for lineno, name, desc in find_undefined_variables(code)
+    ]
+
+
+def _string_call_scan(code: str, tree: ast.Module, call_names: set[str]) -> list[tuple[ast.Call, str]]:
+    """(call, RAW source content) for every matching call whose first arg is
+    a plain string literal — skips dynamic content automatically. Uses the
+    raw source slice (via Source), NOT ast.Constant.value: for a
+    non-raw string containing a backslash sequence Python recognizes as an
+    escape (e.g. Text('x \\frac{1}{2}') — \\f is a real escape, form-feed),
+    `.value` would already be silently corrupted by the time we see it,
+    which is exactly the kind of bug these detectors exist to catch. This
+    mirrors the same reasoning as py."""
+    src = Source(code)
+    out = []
+    for call in find_calls(tree, call_names):
+        if not (call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str)):
+            continue
+        raw = src.text(call.args[0])
+        try:
+            _, _, content, _ = split_string_prefix_and_quote(raw)
+        except ValueError:
+            continue
+        out.append((call, content))
+    return out
+
+
+def detect_thai_in_mathtex(code: str) -> list[Violation]:
+    tree = safe_parse(code)
+    if tree is None:
+        return []
+    violations = []
+    for call, content in _string_call_scan(code, tree, {"MathTex", "Tex"}):
+        if _THAI_RANGE.search(content):
+            violations.append(Violation(
+                rule="THAI_IN_MATHTEX",
+                line=call.lineno,
+                snippet=content[:80],
+                description=(
+                    "\u0e1e\u0e1a\u0e15\u0e31\u0e27\u0e2d\u0e31\u0e01\u0e29\u0e23\u0e20\u0e32\u0e29\u0e32\u0e44\u0e17\u0e22\u0e43\u0e19 MathTex()/Tex() \u2014 "
+                    "\u0e15\u0e49\u0e2d\u0e07\u0e41\u0e22\u0e01\u0e02\u0e49\u0e2d\u0e04\u0e27\u0e32\u0e21\u0e44\u0e17\u0e22\u0e2d\u0e2d\u0e01\u0e40\u0e1b\u0e47\u0e19 Text() \u0e41\u0e25\u0e49\u0e27\u0e43\u0e0a\u0e49 VGroup \u0e08\u0e31\u0e14\u0e27\u0e32\u0e07"
+                ),
+            ))
+    return violations
+
+
+def detect_thai_in_mathrm(code: str) -> list[Violation]:
+    tree = safe_parse(code)
+    if tree is None:
+        return []
+    violations = []
+    mathrm_pattern = re.compile(r"\\mathrm\{([^}]*)\}")
+    for call, content in _string_call_scan(code, tree, {"MathTex", "Tex"}):
+        for m in mathrm_pattern.finditer(content):
+            if _THAI_RANGE.search(m.group(1)):
+                violations.append(Violation(
+                    rule="THAI_IN_MATHRM",
+                    line=call.lineno,
+                    snippet=content[:80],
+                    description=f"\u0e1e\u0e1a\u0e20\u0e32\u0e29\u0e32\u0e44\u0e17\u0e22\u0e43\u0e19 \\mathrm{{{m.group(1)[:20]}}} \u2014 \u0e15\u0e49\u0e2d\u0e07\u0e41\u0e22\u0e01\u0e2d\u0e2d\u0e01\u0e40\u0e1b\u0e47\u0e19 Text()",
+                ))
+    return violations
+
+
+def detect_latex_in_text(code: str) -> list[Violation]:
+    tree = safe_parse(code)
+    if tree is None:
+        return []
+    violations = []
+    complex_latex = re.compile(r"\\(frac|sqrt|sum|int|prod|lim|partial)\b|\\[(\[]")
+    for call, content in _string_call_scan(code, tree, {"Text"}):
+        if complex_latex.search(content):
+            violations.append(Violation(
+                rule="LATEX_IN_TEXT",
+                line=call.lineno,
+                snippet=content[:80],
+                description=(
+                    "\u0e1e\u0e1a LaTeX syntax \u0e0b\u0e31\u0e1a\u0e0b\u0e49\u0e2d\u0e19 (\\frac, \\sqrt \u0e2f\u0e25\u0e2f) \u0e43\u0e19 Text() \u2014 "
+                    "\u0e15\u0e49\u0e2d\u0e07\u0e41\u0e22\u0e01\u0e40\u0e1b\u0e47\u0e19 VGroup(Text('...'), MathTex(r'...')) \u0e41\u0e17\u0e19"
+                ),
+            ))
+    return violations
+
+
+def detect_move_to_scalar(code: str) -> list[Violation]:
+    """Safety net for fix_move_to_scalar — should rarely fire since the
+    fixer runs first, but catches any zone-scalar-var name not in that
+    fixer's known list."""
+    tree = safe_parse(code)
+    if tree is None:
+        return []
+    violations = []
+    zone_suffixes = ("_y", "_bottom", "_top", "_center_y")
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "move_to"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Name)
+        ):
+            name = node.args[0].id
+            if name in ("ORIGIN", "UP", "DOWN", "LEFT", "RIGHT", "UR", "UL", "DR", "DL"):
+                continue
+            if any(name.endswith(suf) for suf in zone_suffixes):
+                violations.append(Violation(
+                    rule="MOVE_TO_SCALAR",
+                    line=node.lineno,
+                    snippet=f".move_to({name})",
+                    description=f".move_to({name}) \u0e2a\u0e48\u0e07 scalar \u2192 \u0e15\u0e49\u0e2d\u0e07\u0e40\u0e1b\u0e47\u0e19 np.array([0, {name}, 0])",
+                ))
+    return violations
+
+
+def detect_axes_too_large(code: str) -> list[Violation]:
+    tree = safe_parse(code)
+    if tree is None:
+        return []
+    violations = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.keyword) or node.arg not in ("x_length", "y_length"):
+            continue
+        if not (isinstance(node.value, ast.Constant) and isinstance(node.value.value, (int, float))
+                and not isinstance(node.value.value, bool)):
+            continue
+        limit = MAX_AXES_X_LENGTH if node.arg == "x_length" else MAX_AXES_Y_LENGTH
+        val = node.value.value
+        if val > limit:
+            violations.append(Violation(
+                rule="AXES_TOO_LARGE",
+                line=node.value.lineno,
+                snippet=f"{node.arg}={val}",
+                description=f"{node.arg}={val} \u0e40\u0e01\u0e34\u0e19 {limit}",
+            ))
+    return violations
+
+
+def detect_font_size_violations(code: str) -> list[Violation]:
+    """Consolidated: was two contradictory detectors in the original
+    (one flagging >30, one flagging >28, with a comment noting one was
+    possibly unused) — now a single check matching the fixer's own limits
+    exactly (MathTex/Tex > 20, Text > 28)."""
+    tree = safe_parse(code)
+    if tree is None:
+        return []
+    violations = []
+    for call_names, limit, label in (
+        ({"MathTex", "Tex"}, MAX_MATHTEX_FONT_SIZE, "MathTex()/Tex()"),
+        ({"Text"}, MAX_TEXT_FONT_SIZE, "Text()"),
+    ):
+        for call in find_calls(tree, call_names):
+            kw = get_keyword(call, "font_size")
+            if kw is None or not isinstance(kw.value, ast.Constant):
+                continue
+            val = kw.value.value
+            if isinstance(val, (int, float)) and not isinstance(val, bool) and val > limit:
+                violations.append(Violation(
+                    rule="FONT_SIZE_TOO_LARGE",
+                    line=kw.value.lineno,
+                    snippet=f"font_size={val}",
+                    description=f"font_size={val} \u0e43\u0e19 {label} \u2014 \u0e15\u0e49\u0e2d\u0e07 \u2264 {limit}",
+                ))
+    return violations
+
+
+def detect_overlapping_labels(code: str) -> list[Violation]:
+    tree = safe_parse(code)
+    if tree is None:
+        return []
+    placement: dict[tuple[str, str], list[int]] = {}
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "next_to"
+            and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name)
+            and isinstance(node.args[1], ast.Name)
+        ):
+            continue
+        ref, direction = node.args[0].id, node.args[1].id
+        if direction not in ("UR", "UL", "DR", "DL", "UP", "DOWN", "LEFT", "RIGHT"):
+            continue
+        placement.setdefault((ref, direction), []).append(node.lineno)
+
+    violations = []
+    for (ref, direction), lines in placement.items():
+        if len(lines) >= 3:
+            violations.append(Violation(
+                rule="OVERLAPPING_LABELS",
+                line=lines[0],
+                snippet=f"\u0e1a\u0e23\u0e23\u0e17\u0e31\u0e14 {lines}: .next_to({ref}, {direction}, ...)",
+                description=(
+                    f"\u0e21\u0e35 {len(lines)} labels \u0e17\u0e35\u0e48 .next_to({ref}, {direction}) "
+                    f"\u0e17\u0e34\u0e28\u0e40\u0e14\u0e35\u0e22\u0e27\u0e01\u0e31\u0e19 \u2014 \u0e08\u0e30\u0e17\u0e31\u0e1a\u0e0b\u0e49\u0e2d\u0e19\u0e01\u0e31\u0e19 \u0e15\u0e49\u0e2d\u0e07\u0e01\u0e23\u0e30\u0e08\u0e32\u0e22\u0e17\u0e34\u0e28\u0e17\u0e32\u0e07"
+                ),
+            ))
+    return violations
+
+
+def detect_vgroup_list_comprehension(code: str) -> list[Violation]:
+    """Safety net — should rarely fire since the fixer handles this
+    structurally, but flags any VGroup(*[...]) shape the fixer's pattern
+    match didn't recognize (e.g. more exotic comprehension forms)."""
+    tree = safe_parse(code)
+    if tree is None:
+        return []
+    violations = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "VGroup"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Starred)
+            and isinstance(node.args[0].value, ast.ListComp)
+        ):
+            violations.append(Violation(
+                rule="VGROUP_LIST_COMPREHENSION",
+                line=node.lineno,
+                snippet="VGroup(*[...])",
+                description="\u0e1e\u0e1a VGroup(*[...]) \u0e17\u0e35\u0e48\u0e2b\u0e25\u0e07\u0e40\u0e2b\u0e25\u0e37\u0e2d\u0e2b\u0e25\u0e31\u0e07 auto-fix \u2014 \u0e15\u0e49\u0e2d\u0e07\u0e40\u0e02\u0e35\u0e22\u0e19 Text() \u0e41\u0e22\u0e01\u0e40\u0e1b\u0e47\u0e19 argument \u0e15\u0e23\u0e07\u0e46 \u0e02\u0e2d\u0e07 VGroup()",
+            ))
+    return violations
+
+
+def detect_unbalanced_latex_braces(code: str) -> list[Violation]:
+    tree = safe_parse(code)
+    if tree is None:
+        return []
+    violations = []
+    for call, content in _string_call_scan(code, tree, {"MathTex", "Tex"}):
+        opens, closes = content.count("{"), content.count("}")
+        if opens != closes:
+            violations.append(Violation(
+                rule="UNBALANCED_LATEX_BRACES",
+                line=call.lineno,
+                snippet=content[:80],
+                description=f"\u0e27\u0e07\u0e40\u0e25\u0e47\u0e1a\u0e1b\u0e35\u0e01\u0e01\u0e32 LaTeX \u0e44\u0e21\u0e48\u0e2a\u0e21\u0e14\u0e38\u0e25: {opens} \u0e40\u0e1b\u0e34\u0e14 \u0e41\u0e15\u0e48 {closes} \u0e1b\u0e34\u0e14",
+            ))
+    return violations
+
+
+def detect_math_errors(code: str) -> list[Violation]:
+    tree = safe_parse(code)
+    if tree is None:
+        return []
+    violations = []
+    for call, content in _string_call_scan(code, tree, {"MathTex"}):
+        if "\\equiv" in content:
+            violations.append(Violation(
+                rule="MATH_EQUIV_INCORRECT",
+                line=call.lineno,
+                snippet=content[:80],
+                description="\u0e1e\u0e1a \\equiv \u0e43\u0e19\u0e2a\u0e21\u0e01\u0e32\u0e23 \u2014 \u0e04\u0e27\u0e23\u0e43\u0e0a\u0e49 = \u0e41\u0e17\u0e19 \\equiv",
+            ))
+    return violations
+
+
+def detect_missing_scaling(code: str) -> list[Violation]:
+    tree = safe_parse(code)
+    if tree is None:
+        return []
+    violations = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "VGroup"
+        ):
+            continue
+        var_name = node.targets[0].id
+        if "axes" in var_name.lower():
+            continue
+        found_scale = False
+        found_move_to_zone = False
+        for later in ast.walk(tree):
+            if not (
+                isinstance(later, ast.Call)
+                and isinstance(later.func, ast.Attribute)
+                and isinstance(later.func.value, ast.Name)
+                and later.func.value.id == var_name
+            ):
+                continue
+            if later.lineno < node.lineno:
+                continue
+            if later.func.attr in ("scale_to_fit_width", "scale_to_fit_height"):
+                found_scale = True
+                break
+            if later.func.attr == "move_to" and later.args and isinstance(later.args[0], ast.Name) \
+                    and later.args[0].id in ("bottom_center", "middle_center"):
+                found_move_to_zone = True
+        if found_move_to_zone and not found_scale:
+            violations.append(Violation(
+                rule="MISSING_SCALING",
+                line=node.lineno,
+                snippet=f"{var_name} = VGroup(...)",
+                description=(
+                    f"\u0e1e\u0e1a VGroup '{var_name}' \u0e40\u0e04\u0e25\u0e37\u0e48\u0e2d\u0e19\u0e44\u0e1b\u0e01\u0e25\u0e32\u0e07/\u0e25\u0e48\u0e32\u0e07 (move_to) "
+                    "\u0e41\u0e15\u0e48\u0e44\u0e21\u0e48\u0e1e\u0e1a\u0e01\u0e32\u0e23 .scale_to_fit_width() \u0e01\u0e48\u0e2d\u0e19\u0e2b\u0e19\u0e49\u0e32\u0e19\u0e31\u0e49\u0e19 \u2014 "
+                    "\u0e2d\u0e32\u0e08\u0e17\u0e33\u0e43\u0e2b\u0e49\u0e40\u0e19\u0e37\u0e49\u0e2d\u0e2b\u0e32\u0e25\u0e49\u0e19\u0e08\u0e2d "
+                    "\u0e41\u0e01\u0e49\u0e42\u0e14\u0e22\u0e40\u0e1e\u0e34\u0e48\u0e21 scaling"
+                ),
+            ))
+    return violations
+
+
+def detect_text_overflow(code: str) -> list[Violation]:
+    """Improved estimate (feedback item 7): differentiate Thai vs Latin
+    character width instead of a flat len()*0.55 estimate, and measure
+    each line of a multi-line string separately rather than the whole
+    string at once."""
+    tree = safe_parse(code)
+    if tree is None:
+        return []
+    max_width = 9.0 * 0.88  # frame_width * 0.88, matches prompts.py clamp target
+    violations = []
+    for call, content in _string_call_scan(code, tree, {"Text"}):
+        kw = get_keyword(call, "font_size")
+        if kw is None or not isinstance(kw.value, ast.Constant):
+            continue
+        font_size = kw.value.value
+        if not isinstance(font_size, (int, float)) or isinstance(font_size, bool):
+            continue
+        for line in (content.splitlines() or [content]):
+            thai_chars = sum(1 for c in line if "\u0E00" <= c <= "\u0E7F")
+            latin_chars = len(line) - thai_chars
+            estimated_width = font_size * (thai_chars * 0.048 + latin_chars * 0.055)
+            if estimated_width > max_width:
+                violations.append(Violation(
+                    rule="TEXT_OVERFLOW",
+                    line=call.lineno,
+                    snippet=line[:60],
+                    description=(
+                        f"Text '{line[:20]}...' (font_size={font_size}) "
+                        f"\u0e04\u0e32\u0e14\u0e27\u0e48\u0e32\u0e08\u0e30\u0e22\u0e32\u0e27\u0e40\u0e01\u0e34\u0e19\u0e01\u0e23\u0e2d\u0e1a\u0e08\u0e2d "
+                        f"(~{estimated_width:.1f} > {max_width:.1f}) \u2014 "
+                        "\u0e43\u0e2b\u0e49\u0e41\u0e1a\u0e48\u0e07\u0e40\u0e1b\u0e47\u0e19\u0e2b\u0e25\u0e32\u0e22\u0e1a\u0e23\u0e23\u0e17\u0e31\u0e14\u0e43\u0e19 VGroup "
+                        "\u0e2b\u0e23\u0e37\u0e2d\u0e2b\u0e48\u0e2d\u0e14\u0e49\u0e27\u0e22 .scale_to_fit_width()"
+                    ),
+                ))
+    return violations
+
+
+def detect_bottom_zone_empty(code: str) -> list[Violation]:
+    """AST-based: any VGroup(...).move_to(bottom_center) call anywhere in
+    the file means the bottom zone has content. Only flags when the file
+    has substantial Text/MathTex/VGroup content overall but genuinely none
+    of it ever reaches the bottom zone."""
+    tree = safe_parse(code)
+    if tree is None:
+        return []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "move_to"
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "bottom_center"
+        ):
+            return []  # bottom zone has content somewhere — fine
+
+    has_content = any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id in ("Text", "MathTex", "VGroup")
+        for n in ast.walk(tree)
+    )
+    if not has_content:
+        return []
+    return [Violation(
+        rule="BOTTOM_ZONE_EMPTY",
+        line=1,
+        snippet="construct()",
+        description="\u0e44\u0e21\u0e48\u0e1e\u0e1a\u0e40\u0e19\u0e37\u0e49\u0e2d\u0e2b\u0e32\u0e43\u0e19\u0e42\u0e0b\u0e19\u0e25\u0e48\u0e32\u0e07 \u2014 \u0e15\u0e23\u0e27\u0e08\u0e2a\u0e2d\u0e1a\u0e27\u0e48\u0e32\u0e21\u0e35 VGroup(...).move_to(bottom_center) \u0e2b\u0e23\u0e37\u0e2d\u0e44\u0e21\u0e48",
+    )]
+
+
+ALL_DETECTORS = [
+    detect_undefined_variables,
+    detect_thai_in_mathtex,
+    detect_thai_in_mathrm,
+    detect_latex_in_text,
+    detect_move_to_scalar,
+    detect_axes_too_large,
+    detect_font_size_violations,
+    detect_overlapping_labels,
+    detect_vgroup_list_comprehension,
+    detect_unbalanced_latex_braces,
+    detect_math_errors,
+    detect_missing_scaling,
+    detect_text_overflow,
+    detect_bottom_zone_empty,
+]
+
+
+# ============================================================================
+# ORCHESTRATION
+# ============================================================================
 
 def preprocess_code(code_string: str) -> ValidationResult:
     """
     Run all auto-fixes and violation checks on Gemini-generated Manim code.
-    
-    Phase 1 order matters: some fixes depend on previous fixes.
+
+    Order:
+      1. Phase 1a — token-level fixes (syntax-error tolerant; these run even
+         if the code doesn't parse, since tokenizing is more lenient than
+         full grammar validation).
+      2. Phase 1b/1c/1d — AST-based fixes. Each individually calls
+         safe_parse() and no-ops on unparseable code, so a syntax
+         error anywhere doesn't crash the pipeline — it just means these
+         phases can't do anything until Phase 2 reports the syntax error
+         back to Gemini for a rewrite.
+      3. Phase 2 — detect remaining violations, starting with an explicit
+         syntax-error check. If the code doesn't parse at all, we report
+         ONLY that (matching the old behavior of short-circuiting further
+         AST-dependent checks, but now as an explicit, actionable
+         violation instead of a silent skip).
     """
     auto_fixes: list[str] = []
     code = code_string
 
-    # ── Phase 1: Auto-fix (order matters) ───────────────────────────────────
-    
-    # 1. Structural fixes first
-    code = _fix_missing_numpy_import(code, auto_fixes)
-    code = _fix_showcreation(code, auto_fixes)
-    code = _fix_get_graph(code, auto_fixes)
-    code = _fix_tex_mobject(code, auto_fixes)
-    code = _fix_indicate_flash(code, auto_fixes)
-    code = _fix_font_in_mathtex(code, auto_fixes)
-    code = _fix_aligned_edge_center(code, auto_fixes)
-    code = _fix_enforce_zone_clamping(code, auto_fixes) 
-    
-    # 2. Variable/value fixes
-    code = _fix_bottom_zone_bottom(code, auto_fixes)
-    code = _fix_move_to_scalar(code, auto_fixes)
-    code = _fix_include_numbers_in_axis_config(code, auto_fixes)
-    code = _fix_axes_too_large(code, auto_fixes)
-    code = _fix_font_size_too_large(code, auto_fixes)
-    
-    # 3. String content fixes (order: most specific first)
-    # Must run BEFORE other MathTex/Text content fixers so they operate on
-    # normalized (single-backslash) LaTeX rather than over-escaped garbage.
-    code = _fix_over_escaped_latex(code, auto_fixes)
-    code = _fix_vgroup_list_comprehension(code, auto_fixes)
-    code = _fix_latex_in_text_calls(code, auto_fixes)
-    code = _fix_step_title_latex(code, auto_fixes)
-    code = _fix_thai_in_mathrm(code, auto_fixes)
-    code = _fix_arrange_right_long_thai(code, auto_fixes)
-    code = _fix_text_in_mathtex(code, auto_fixes)
-    code = _fix_single_backslash_lambda(code, auto_fixes)
-    code = _fix_latex_escape_in_text(code, auto_fixes)
-    code = _fix_mathrm_curly_braces(code, auto_fixes)
-    code = _fix_double_quote_in_strings(code, auto_fixes)
-    code = _fix_long_mathtex(code, auto_fixes)
+    # ── Phase 1a: token-level (syntax-tolerant) ─────────────────────────
+    for fixer in TOKEN_LEVEL_FIXERS:
+        code = fixer(code, auto_fixes)
 
-    # ── Phase 2: Detect remaining violations ─────────────────────────────────
-    violations: list[Violation] = []
+    # ── Phase 1b: AST-based structural/keyword fixes ────────────────────
+    for fixer in PHASE_1B_FIXERS:
+        code = fixer(code, auto_fixes)
 
-    # Syntax-error check runs FIRST and short-circuits everything else: if
-    # the code doesn't parse, every other detector's output is unreliable
-    # (several of them fall back to "no violations" on a SyntaxError, which
-    # would otherwise look like a clean bill of health). Some auto-fixers
-    # above are themselves capable of introducing a syntax error, so this
-    # check runs on the post-auto-fix code, not the original input.
-    syntax_violations = _detect_syntax_error(code)
+    # ── Phase 1c: string CONTENT fixes (MathTex/Tex/Text) ───────────────
+    code = fix_string_contents(code, auto_fixes)
+
+    # ── Phase 1d: structural rewrites needing correct indentation ───────
+    for fixer in PHASE_1D_FIXERS:
+        code = fixer(code, auto_fixes)
+
+    # ── Phase 2: detect remaining violations ────────────────────────────
+    syntax_violations = detect_syntax_error(code)
     if syntax_violations:
-        return ValidationResult(
-            fixed_code=code,
-            violations=syntax_violations,
-            auto_fixes=auto_fixes,
-        )
+        # Same short-circuit the original had (its undefined-variable
+        # detector silently caught SyntaxError and returned early) — now
+        # explicit and reported as its own actionable violation instead of
+        # just silently skipping the rest.
+        return ValidationResult(fixed_code=code, violations=syntax_violations, auto_fixes=auto_fixes)
 
-    lines = code.splitlines()
+    violations: list[Violation] = []
+    for detector in ALL_DETECTORS:
+        violations.extend(detector(code))
 
-    # Existing validations
-    violations.extend(_detect_missing_numpy_import(lines))
-    violations.extend(_detect_thai_in_mathtex(lines))
-    violations.extend(_detect_thai_in_mathrm(lines))
-    violations.extend(_detect_latex_in_text(lines))
-    violations.extend(_detect_move_to_scalar(lines))
-    violations.extend(_detect_axes_too_large(lines))    # ← UPDATED THRESHOLDS
-    violations.extend(_detect_overlapping_labels(lines))
-    violations.extend(_detect_final_answer_arrange_right(lines))
-    violations.extend(_detect_vgroup_list_comprehension(lines))
-    violations.extend(_detect_unbalanced_latex_braces(lines))
-    
-    # New validations
-    violations.extend(_detect_math_errors(lines))
-    violations.extend(_detect_missing_scaling(lines))   # ← UPDATED SCAN LOGIC
-    violations.extend(_detect_font_size_violations(lines))
-    violations.extend(_detect_bottom_zone_empty(lines))
-    violations.extend(_detect_undefined_variables(code))
-    
-    # ← NEWLY ADDED
-    violations.extend(_detect_text_overflow(lines)) 
-
-    return ValidationResult(
-        fixed_code=code,
-        violations=violations,
-        auto_fixes=auto_fixes,
-    )
+    return ValidationResult(fixed_code=code, violations=violations, auto_fixes=auto_fixes)
 
 
-def validate_episode_count(lesson_json: dict, expected_min: int = None) -> tuple[bool, str]:
+def validate_episode_count(lesson_json: dict, expected_min: int | None = None) -> tuple[bool, str]:
     declared = lesson_json.get("total_episodes", 0)
     actual = len(lesson_json.get("episodes", []))
     if declared != actual:
-        return False, (
-            f"total_episodes={declared} but episodes array has {actual} items."
-        )
+        return False, f"total_episodes={declared} but episodes array has {actual} items."
     if expected_min and actual < expected_min:
-        return False, (
-            f"Only {actual} episode(s) generated but expected at least {expected_min}."
-        )
+        return False, f"Only {actual} episode(s) generated but expected at least {expected_min}."
     return True, "ok"
